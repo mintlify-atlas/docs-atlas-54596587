@@ -1,0 +1,216 @@
+---
+title: "Contributing"
+description: "How to set up the pkmn engine for development, run tests, and submit changes."
+---
+
+<Warning>
+  The pkmn engine is under active development. The `main` branch contains breaking changes that may not be fully documented. The v0.1 release is the first intended stable version.
+</Warning>
+
+## Getting started
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/pkmn/engine.git
+    cd engine
+    ```
+  </Step>
+  <Step title="Install dependencies">
+    ```bash
+    npm install
+    ```
+
+    The `postinstall` script (`install-pkmn-engine`) runs automatically. It checks for a compatible Zig compiler, downloads one to `build/bin/zig` if none is found, and builds the required native Node addons.
+
+    <Note>
+      If you have configured npm to `--ignore-scripts`, run `npx install-pkmn-engine` manually after installing.
+    </Note>
+  </Step>
+  <Step title="Build">
+    <Tabs>
+      <Tab title="TypeScript (npm)">
+        ```bash
+        npm run build
+        ```
+
+        This compiles the TypeScript source with `tsc`.
+      </Tab>
+      <Tab title="Zig">
+        ```bash
+        zig build --summary all -Dlog -Dchance -Dcalc -p build
+        zig build --summary all -Dshowdown -Dlog -Dchance -Dcalc -p build
+        ```
+
+        `make build` runs both the Zig and TypeScript builds together.
+      </Tab>
+    </Tabs>
+  </Step>
+</Steps>
+
+## Project structure
+
+```
+engine/
+├── src/
+│   ├── lib/        # Zig engine implementation
+│   ├── pkg/        # TypeScript driver code (@pkmn/engine)
+│   ├── test/       # Integration tests and benchmarks
+│   └── tools/      # Development scripts (generate, debug, release)
+├── examples/       # Runnable code examples (C, JS/TS, Zig)
+├── docs/           # Design and protocol documentation
+├── build.zig       # Zig build configuration
+└── package.json    # npm scripts and TypeScript dependencies
+```
+
+<AccordionGroup>
+  <Accordion title="src/lib/ — Zig engine code">
+    The core battle simulation logic, written in Zig. Organized by generation (`gen1/`, `gen2/`) with shared utilities in `common/`. Bindings for Node.js, WebAssembly, and C live in `bindings/`.
+
+    The Zig code loosely follows the [TigerBeetle style guide](https://github.com/tigerbeetledb/tigerbeetle/blob/main/docs/TIGER_STYLE.md).
+  </Accordion>
+  <Accordion title="src/pkg/ — TypeScript driver code">
+    The `@pkmn/engine` npm package. Wraps the native engine via a Node.js addon or WebAssembly, exposes a TypeScript API, and handles data/protocol parsing. TypeScript code follows the [`@pkmn` style guide](https://pkmn.cc/@pkmn/#style).
+  </Accordion>
+  <Accordion title="src/test/ — Integration tests and benchmarks">
+    Contains `integration.test.ts`, `benchmark.ts`, `fuzz.ts`, and their Zig counterparts. Also includes the `showdown/` directory with mirrored tests against patched Pokémon Showdown and `regression/fixtures/` for replay-based regression testing.
+  </Accordion>
+  <Accordion title="src/tools/ — Development scripts">
+    - `generate.ts` — generates test stubs for new effects
+    - `debug.ts` — powers the `pkmn-debug` binary for decoding binary protocol
+    - `demo.ts` — demonstration script
+    - `release.ts` — release automation
+  </Accordion>
+  <Accordion title="examples/ — Runnable examples">
+    Fully commented, runnable examples in C (`examples/c/`), JavaScript/TypeScript (`examples/js/`), and Zig (`examples/zig/`). Each subdirectory has its own build setup.
+  </Accordion>
+  <Accordion title="docs/ — Design and protocol documentation">
+    Markdown documents covering engine design (`DESIGN.md`), the binary protocol (`PROTOCOL.md`), testing methodology (`TESTING.md`), research notes (`RESEARCH.md`), and this contributing guide.
+  </Accordion>
+</AccordionGroup>
+
+## Running tests
+
+Always run the tests before submitting a pull request.
+
+<Tabs>
+  <Tab title="Unit tests">
+    ```bash
+    # TypeScript driver tests
+    npm test
+
+    # Zig engine tests (both cartridge and showdown mode)
+    zig build --summary all -Dlog -Dchance -Dcalc test
+    zig build --summary all -Dshowdown -Dlog -Dchance -Dcalc test
+    ```
+
+    `make test` runs all of the above.
+  </Tab>
+  <Tab title="Integration tests">
+    ```bash
+    npm run test:integration
+    ```
+
+    Integration tests run the engine against patched Pokémon Showdown for each supported generation using an `ExhaustiveRunner`. These tests take longer and require the engine to be built with `-Dshowdown -Dlog`.
+  </Tab>
+</Tabs>
+
+See the [Testing](/development/testing) page for a full description of the test infrastructure.
+
+## Code style
+
+<Tabs>
+  <Tab title="TypeScript">
+    ```bash
+    # Check for lint errors
+    npm run lint
+
+    # Auto-fix lint errors
+    npm run fix
+    ```
+
+    TypeScript linting uses ESLint with the `@pkmn/eslint-config` configuration.
+  </Tab>
+  <Tab title="Zig">
+    ```bash
+    # Check formatting
+    ziglint --exclude examples/zig/example.zig,src/tools/demo.zig
+
+    # Auto-format
+    zig fmt . --exclude build
+    ```
+  </Tab>
+</Tabs>
+
+`make lint` and `make fix` run both language linters together.
+
+## Development tools
+
+### `generate` — test stub generator
+
+When adding support for a new effect, first add it to the `generate` tool (`src/tools/generate.ts`), then produce stubs:
+
+```bash
+npm run generate -- tests <GEN>
+```
+
+Replace `<GEN>` with the generation number (e.g., `1` or `2`). The generated stubs need to be manually filled in, but they provide the correct structure and scaffolding.
+
+### `pkmn-debug` — binary protocol debugger
+
+The `pkmn-debug` tool decodes the binary data structures and protocol used by the engine and outputs a standalone HTML debug page. It ships as a binary with the `@pkmn/engine` package:
+
+```bash
+# Pipe binary debug output into pkmn-debug
+<cmd> | pkmn-debug > debug.html
+
+# Or read from a file
+pkmn-debug <file> > debug.html
+
+# Output as JSON instead of HTML
+pkmn-debug --json <file> > debug.json
+```
+
+Run it directly from a local install using `npx pkmn-debug`, or install globally:
+
+```bash
+npm install --global @pkmn/engine
+```
+
+## How to contribute
+
+The best way to contribute to the pkmn engine is often to contribute to the upstream projects it depends on:
+
+- Fixing bugs or simplifying [smogon/pokemon-showdown](https://github.com/smogon/pokemon-showdown)
+- Improving or clarifying the [pret](https://github.com/pret) game decompilations
+
+These changes benefit not just the engine but the wider Pokémon development community.
+
+When opening issues or pull requests on the engine repository:
+
+- Use one of the existing issue/PR templates and fill them out completely
+- Pull requests are unlikely to be merged without tests
+- It is fine to open a draft pull request without tests to request feedback or help with testing
+
+<Tip>
+  Read through `docs/DESIGN.md` and `docs/PROTOCOL.md` before working on engine internals. The design documentation explains the key architectural decisions and constraints.
+</Tip>
+
+## Reporting bugs
+
+Report issues at [https://github.com/pkmn/engine/issues](https://github.com/pkmn/engine/issues).
+
+## License
+
+The pkmn engine is distributed under the [MIT License](https://github.com/pkmn/engine/blob/master/LICENSE).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="flask" href="/development/testing">
+    Unit tests, integration tests, and test writing guidelines
+  </Card>
+  <Card title="Benchmarking" icon="gauge" href="/development/benchmarking">
+    Running and interpreting performance benchmarks
+  </Card>
+</CardGroup>

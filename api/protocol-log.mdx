@@ -1,0 +1,275 @@
+---
+title: "Protocol & Log"
+description: "Parse the engine's binary protocol log into Pokémon Showdown–compatible text protocol messages."
+---
+
+When a battle is created with `log: true`, the `battle.log` property is
+populated after each `update` call with a binary buffer of protocol messages.
+Use the `Log` class to decode these messages into structured `ParsedLine`
+objects that mirror [Pokémon Showdown's text protocol](https://github.com/smogon/pokemon-showdown/blob/master/sim/SIM-PROTOCOL.md).
+
+<Note>
+  Logging requires **both** runtime configuration (`log: true` in
+  `CreateOptions`) **and** a native engine built with `-Dlog`. Without
+  `-Dlog`, enabling `log: true` has no effect.
+</Note>
+
+---
+
+## Enabling logging
+
+Pass `log: true` (along with player names) when creating the battle:
+
+```ts
+import { Battle, Log, Lookup } from '@pkmn/engine';
+import { Generations } from '@pkmn/data';
+import { Dex } from '@pkmn/dex';
+
+const gens = new Generations(Dex);
+const gen  = gens.get(1);
+
+const options = {
+  seed: [1, 2, 3, 4],
+  showdown: true,
+  log: true,
+  p1: { name: 'Alice', team: p1Team },
+  p2: { name: 'Bob',   team: p2Team },
+} as const;
+
+const battle = Battle.create(gen, options);
+```
+
+---
+
+## `Log` class
+
+`Log` decodes the engine's binary protocol into structured `ParsedLine` objects.
+
+```ts
+class Log {
+  readonly gen: Generation;
+  readonly lookup: Lookup;
+  readonly info: Info;
+
+  constructor(gen: Generation, lookup: Lookup, info: Info);
+
+  *parse(data: DataView): Iterable<ParsedLine>;
+}
+```
+
+### Constructor
+
+```ts
+const log = new Log(gen, Lookup.get(gen), new Info(gen, options));
+```
+
+<ParamField path="gen" type="Generation" required>
+  The generation of the battle being parsed.
+</ParamField>
+
+<ParamField path="lookup" type="Lookup" required>
+  The lookup table for the generation. Obtain with `Lookup.get(gen)`.
+</ParamField>
+
+<ParamField path="info" type="Info" required>
+  Battle context (player names and team details) needed to resolve Pokémon
+  identifiers in the protocol. See [`Info`](#info-class) below.
+</ParamField>
+
+### `log.parse(data)`
+
+```ts
+*parse(data: DataView): Iterable<ParsedLine>
+```
+
+Decodes `data` (the `DataView` from `battle.log`) and yields one
+[`ParsedLine`](#parsedline) per protocol message.
+
+<ParamField path="data" type="DataView" required>
+  The binary log buffer. Use `battle.log!` directly.
+</ParamField>
+
+<ResponseField name="yields" type="ParsedLine">
+  One structured protocol message per yield. See
+  [`ParsedLine`](#parsedline).
+</ResponseField>
+
+---
+
+## `Info` class
+
+Holds the battle context required to translate binary identifiers into
+human-readable Pokémon names and player names.
+
+```ts
+class Info {
+  p1: SideInfo;
+  p2: SideInfo;
+
+  constructor(gen: Generation, sides: { p1: PlayerOptions; p2: PlayerOptions });
+}
+```
+
+<ParamField path="gen" type="Generation" required>
+  The generation of the battle.
+</ParamField>
+
+<ParamField path="sides" type="{ p1: PlayerOptions; p2: PlayerOptions }" required>
+  The same `p1` / `p2` player options passed to `Battle.create`.
+</ParamField>
+
+<ResponseField name="p1" type="SideInfo">
+  Parsed information for Player 1's side. See [`SideInfo`](#sideinfo-class).
+</ResponseField>
+
+<ResponseField name="p2" type="SideInfo">
+  Parsed information for Player 2's side.
+</ResponseField>
+
+---
+
+## `SideInfo` class
+
+Per-side context used during binary protocol parsing.
+
+```ts
+class SideInfo {
+  name: string;
+  team: PokemonInfo[];
+
+  constructor(gen: Generation, player: PlayerOptions);
+}
+```
+
+<ResponseField name="name" type="string">
+  The player's display name (used in `|win|` messages).
+</ResponseField>
+
+<ResponseField name="team" type="PokemonInfo[]">
+  Parsed information for each Pokémon on the team.
+
+  <Expandable title="PokemonInfo fields">
+    <ResponseField name="name" type="string | undefined">
+      The Pokémon's nickname.
+    </ResponseField>
+    <ResponseField name="species" type="string | undefined">
+      The Pokémon's species name.
+    </ResponseField>
+    <ResponseField name="gender" type="string | undefined">
+      The Pokémon's gender (`'M'`, `'F'`, or `'N'`).
+    </ResponseField>
+    <ResponseField name="shiny" type="boolean | undefined">
+      Whether the Pokémon is shiny.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## `ParsedLine` type
+
+```ts
+interface ParsedLine {
+  args: Protocol.BattleArgType;
+  kwArgs: Protocol.BattleArgsKWArgType;
+}
+```
+
+A decoded protocol message, using the same shape as [`@pkmn/protocol`](https://github.com/pkmn/ps/tree/main/protocol).
+
+<ResponseField name="args" type="Protocol.BattleArgType">
+  Positional protocol arguments. The first element is always the message kind
+  (e.g. `'move'`, `'switch'`, `'-damage'`). Subsequent elements are
+  kind-specific payloads such as Pokémon identifiers, move names, and HP
+  values.
+</ResponseField>
+
+<ResponseField name="kwArgs" type="Protocol.BattleArgsKWArgType">
+  Keyword (named) protocol arguments. Optional modifiers like `[from]`,
+  `[of]`, `[silent]`, `[miss]`, `[still]`, etc.
+</ResponseField>
+
+### Message kinds
+
+The following message kinds are emitted by the Generation I engine:
+
+| `args[0]`          | Description |
+|--------------------|-------------|
+| `move`             | A Pokémon used a move. |
+| `switch`           | A Pokémon switched in. |
+| `cant`             | A Pokémon could not move (sleep, freeze, etc.). |
+| `faint`            | A Pokémon fainted. |
+| `turn`             | A new turn started. |
+| `win`              | A player won. |
+| `tie`              | The battle ended in a tie. |
+| `-damage`          | HP was lost. |
+| `-heal`            | HP was restored. |
+| `-status`          | A status condition was applied. |
+| `-curestatus`      | A status condition was cured. |
+| `-boost`           | A stat was boosted. |
+| `-unboost`         | A stat was lowered. |
+| `-clearallboost`   | All stat changes were cleared (Haze). |
+| `-fail`            | A move failed. |
+| `-miss`            | A move missed. |
+| `-hitcount`        | A multi-hit move landed `n` times. |
+| `-prepare`         | A Pokémon is charging a two-turn move. |
+| `-mustrecharge`    | A Pokémon must recharge next turn. |
+| `-activate`        | A volatile effect triggered. |
+| `-fieldactivate`   | A field effect triggered (Pay Day). |
+| `-start`           | A volatile status started. |
+| `-end`             | A volatile status ended. |
+| `-ohko`            | A one-hit KO move landed. |
+| `-crit`            | A critical hit occurred. |
+| `-supereffective`  | The move was super effective. |
+| `-resisted`        | The move was not very effective. |
+| `-immune`          | The target was immune. |
+| `-transform`       | A Pokémon Transformed. |
+
+---
+
+## Complete example
+
+```ts
+import { Generations } from '@pkmn/data';
+import { Dex } from '@pkmn/dex';
+import { Battle, Choice, Info, Log, Lookup, Result } from '@pkmn/engine';
+
+const gens = new Generations(Dex);
+const gen  = gens.get(1);
+
+const options = {
+  seed: [1, 2, 3, 4],
+  showdown: true,
+  log: true,
+  p1: { name: 'Alice', team: p1Team },
+  p2: { name: 'Bob',   team: p2Team },
+} as const;
+
+const battle = Battle.create(gen, options);
+const log    = new Log(gen, Lookup.get(gen), new Info(gen, options));
+
+let result: Result;
+let c1 = Choice.pass;
+let c2 = Choice.pass;
+
+while (!(result = battle.update(c1, c2)).type) {
+  // Decode and print every protocol message from this turn
+  for (const { args, kwArgs } of log.parse(battle.log!)) {
+    console.log(args, kwArgs);
+    // e.g. args = ['move', 'p1a: Bulbasaur', 'Sleep Powder', 'p2a: Tauros']
+    //      kwArgs = {}
+  }
+
+  c1 = pickRandom(battle.choices('p1', result));
+  c2 = pickRandom(battle.choices('p2', result));
+}
+
+// Parse the final turn's messages
+for (const { args, kwArgs } of log.parse(battle.log!)) {
+  console.log(args, kwArgs);
+}
+
+function pickRandom<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+```

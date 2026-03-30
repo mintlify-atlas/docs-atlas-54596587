@@ -1,0 +1,380 @@
+---
+title: "TypeScript / JavaScript"
+description: "Complete guide to using @pkmn/engine from TypeScript and JavaScript, including battle creation, the update loop, state inspection, and protocol log parsing."
+---
+
+## Overview
+
+`@pkmn/engine` is the official TypeScript/JavaScript driver for the pkmn engine. It wraps the native Zig engine (or a WebAssembly build for browsers) and exposes a typed, ergonomic API for running Pokémon battles.
+
+The package depends on [`@pkmn/data`](https://www.npmjs.com/package/@pkmn/data), which provides generation data types, and requires a `Dex` implementation — typically [`@pkmn/dex`](https://www.npmjs.com/package/@pkmn/dex).
+
+```bash
+npm install @pkmn/engine @pkmn/data @pkmn/dex
+```
+
+<Warning>
+  The `@pkmn/engine` package runs a `postinstall` script that downloads and builds the native Node addon. If you have configured npm to `--ignore-scripts`, you must run `npx install-pkmn-engine` manually after installation.
+</Warning>
+
+## Initialization
+
+In Node, the native addon is loaded synchronously on first use. In the browser you must call `initialize()` before creating any battles to ensure the WebAssembly module is instantiated.
+
+```ts
+import {initialize} from '@pkmn/engine';
+
+// Required in the browser; safe but optional in Node
+await initialize(true); // true = Pokémon Showdown compatibility mode
+```
+
+`initialize` accepts a boolean `showdown` flag that selects which addon variant to load. You can call it at most once per `showdown` value — calling it a second time with the same value throws.
+
+See the [Browser / WebAssembly guide](/guides/browser-wasm) for details on browser usage.
+
+## Creating a battle
+
+Use `Battle.create()` to initialize a brand-new battle from the start of turn 0.
+
+```ts
+import {Dex} from '@pkmn/dex';
+import {Generations} from '@pkmn/data';
+import {Battle} from '@pkmn/engine';
+
+const gens = new Generations(Dex);
+const gen = gens.get(1);
+
+const battle = Battle.create(gen, {
+  p1: {name: 'Player A', team: p1Team},
+  p2: {name: 'Player B', team: p2Team},
+  seed: [1, 2, 3, 4],
+  showdown: true,
+  log: true,
+});
+```
+
+### `CreateOptions`
+
+| Field | Type | Description |
+|---|---|---|
+| `seed` | `number[]` | RNG seed. In showdown mode: 4-tuple of 16-bit unsigned integers. In cartridge mode: 10-tuple of bytes. |
+| `showdown` | `boolean` | Enable Pokémon Showdown compatibility. Requires the engine to be built with `-Dshowdown`. |
+| `log` | `true \| false` | Capture binary protocol logs. If `true`, player `name` fields are required and `battle.log` will be populated after each `update`. |
+| `p1` | `PlayerOptions` | Player 1's name and team. `name` is required when `log: true`. |
+| `p2` | `PlayerOptions` | Player 2's name and team. `name` is required when `log: true`. |
+| `inert` | `true` | Initialize without native code (for serialization use cases). |
+
+### `PlayerOptions`
+
+```ts
+interface PlayerOptions {
+  name: string;           // Player's display name (required when log: true)
+  team: Partial<PokemonSet>[];  // Up to 6 Pokémon
+}
+```
+
+The `team` field accepts the same `Partial<PokemonSet>` format used throughout `@pkmn/data`. You can parse Pokémon Showdown packed team strings with [`@pkmn/sets`](https://www.npmjs.com/package/@pkmn/sets):
+
+```ts
+import {Team} from '@pkmn/sets';
+import {Dex} from '@pkmn/dex';
+
+const team = Team.unpack(
+  'Fushigidane|Bulbasaur||-|SleepPowder,SwordsDance,RazorLeaf,BodySlam|||||||]' +
+  'Hitokage|Charmander||-|FireBlast,FireSpin,Slash,Counter|||||||', Dex
+)!.team;
+```
+
+## Restoring a battle
+
+Use `Battle.restore()` to re-instantiate a battle that is already in progress from serialized state. This is useful for resuming a battle after a process restart or for replaying a recorded game.
+
+```ts
+import {Battle} from '@pkmn/engine';
+
+const snapshot = battle.toJSON(); // Data<Battle>
+
+const restored = Battle.restore(gen, snapshot, {
+  p1: {name: 'Player A', team: p1Team},
+  p2: {name: 'Player B', team: p2Team},
+  showdown: true,
+  log: true,
+});
+```
+
+### `RestoreOptions` vs `CreateOptions`
+
+- `RestoreOptions` does not include a `seed` field — the seed is embedded in the serialized battle state.
+- `RestoreOptions` does not include an `inert` field.
+- Player `name` fields are always required in `RestoreOptions` (there is no variant without `name`).
+
+## The battle loop
+
+<Steps>
+  <Step title="Call update() with initial pass choices">
+    At the very start of a battle, both players must pass to send out their lead Pokémon. The `Choice.pass` constant is the correct value to use here.
+
+    ```ts
+    import {Battle, Choice, Result} from '@pkmn/engine';
+
+    let result: Result;
+    let c1 = Choice.pass;
+    let c2 = Choice.pass;
+    ```
+  </Step>
+  <Step title="Loop until result.type is set">
+    Call `battle.update(c1, c2)`. The returned `Result` has a `type` field that is `undefined` while the battle is ongoing, or `'win'`, `'lose'`, `'tie'`, or `'error'` when it ends.
+
+    ```ts
+    while (!(result = battle.update(c1, c2)).type) {
+      c1 = choose(battle.choices('p1', result));
+      c2 = choose(battle.choices('p2', result));
+    }
+    ```
+  </Step>
+  <Step title="Enumerate valid choices">
+    After each non-terminal update, call `battle.choices(player, result)` to get the valid choices for each player. Pass the entire `Result` object — the method reads `result.p1` or `result.p2` depending on the player argument.
+
+    ```ts
+    const p1Choices = battle.choices('p1', result); // Choice[]
+    const p2Choices = battle.choices('p2', result); // Choice[]
+    ```
+
+    <Warning>
+      Passing a choice that is not in the list returned by `choices()` is **undefined behavior** and may corrupt state or crash the engine.
+    </Warning>
+  </Step>
+  <Step title="Handle the terminal result">
+    Once `result.type` is set, the battle is over. The result is from the perspective of Player 1.
+
+    ```ts
+    const msg = {
+      win: 'won by Player A',
+      lose: 'won by Player B',
+      tie: 'ended in a tie',
+      error: 'encountered an error',
+    }[result.type];
+
+    console.log(`Battle ${msg} after ${battle.turn} turns`);
+    ```
+  </Step>
+</Steps>
+
+### Complete battle example
+
+The following is a complete runnable example adapted from [`examples/js/example.ts`](https://github.com/pkmn/engine/blob/master/examples/js/example.ts):
+
+```ts
+import {Generations} from '@pkmn/data';
+import {Dex} from '@pkmn/dex';
+import {Battle, Choice, Log, Lookup, Result, initialize} from '@pkmn/engine';
+import {Team} from '@pkmn/sets';
+
+const P1 = Team.unpack(
+  'Fushigidane|Bulbasaur||-|SleepPowder,SwordsDance,RazorLeaf,BodySlam|||||||]' +
+  'Hitokage|Charmander||-|FireBlast,FireSpin,Slash,Counter|||||||]' +
+  'Zenigame|Squirtle||-|Surf,Blizzard,BodySlam,Rest|||||||]' +
+  'Pikachuu|Pikachu||-|Thunderbolt,ThunderWave,Surf,SeismicToss|||||||]' +
+  'Koratta|Rattata||-|SuperFang,BodySlam,Blizzard,Thunderbolt|||||||]' +
+  'Poppo|Pidgey||-|DoubleEdge,QuickAttack,WingAttack,MirrorMove|||||||', Dex
+)!.team;
+
+const P2 = Team.unpack(
+  'Kentarosu|Tauros||-|BodySlam,HyperBeam,Blizzard,Earthquake|||||||]' +
+  'Rakkii|Chansey||-|Reflect,SeismicToss,SoftBoiled,ThunderWave|||||||]' +
+  'Kabigon|Snorlax||-|BodySlam,Reflect,Rest,IceBeam|||||||]' +
+  'Nasshii|Exeggutor||-|SleepPowder,Psychic,Explosion,DoubleEdge|||||||]' +
+  'Sutaamii|Starmie||-|Recover,ThunderWave,Blizzard,Thunderbolt|||||||]' +
+  'Fuudin|Alakazam||-|Psychic,SeismicToss,ThunderWave,Recover|||||||', Dex
+)!.team;
+
+const gens = new Generations(Dex);
+const gen = gens.get(1);
+const options = {
+  p1: {name: 'Player A', team: P1},
+  p2: {name: 'Player B', team: P2},
+  seed: [1, 2, 3, 4],
+  showdown: true,
+  log: true,
+};
+
+const play = () => {
+  const battle = Battle.create(gen, options);
+  const log = new Log(gen, Lookup.get(gen), options);
+
+  const display = () => {
+    for (const line of log.parse(battle.log!)) {
+      console.log(line);
+    }
+  };
+
+  // Simple random choice selector
+  const choose = (choices: Choice[]) =>
+    choices[Math.floor(Math.random() * choices.length)];
+
+  let result: Result, c1 = Choice.pass, c2 = Choice.pass;
+  while (!(result = battle.update(c1, c2)).type) {
+    display();
+    c1 = choose(battle.choices('p1', result));
+    c2 = choose(battle.choices('p2', result));
+  }
+  display(); // show logs from the final update
+
+  const msg = {
+    win: 'won by Player A',
+    lose: 'won by Player B',
+    tie: 'ended in a tie',
+    error: 'encountered an error',
+  }[result.type];
+
+  console.log(`Battle ${msg} after ${battle.turn} turns`);
+};
+
+// In the browser, initialize must be called first
+if ('process' in globalThis) {
+  play();
+} else {
+  initialize(options.showdown).then(play).catch(console.error);
+}
+```
+
+## Reading battle state
+
+Call `battle.toJSON()` to get a plain JavaScript snapshot of the full battle state. The returned object matches the `Data<Battle>` shape and contains no methods — it is safe to serialize to JSON.
+
+```ts
+const state = battle.toJSON();
+console.log(state.turn);        // current turn number
+console.log(state.lastDamage);  // last damage dealt
+console.log(state.prng);        // current RNG seed
+```
+
+You can also read state directly through the live `Battle` object:
+
+### Accessing sides
+
+```ts
+// Iterate both sides
+for (const side of battle.sides) {
+  console.log(side.lastUsedMove);
+  console.log(side.lastSelectedMove);
+}
+
+// Access a specific player's side
+const p1Side = battle.side('p1');
+const p2Side = battle.foe('p1'); // opponent's side
+```
+
+### Accessing Pokémon
+
+```ts
+const side = battle.side('p1');
+
+// Active Pokémon (undefined before the battle starts)
+const active = side.active;
+if (active) {
+  console.log(active.species);   // current species ID
+  console.log(active.hp);        // current HP
+  console.log(active.status);    // status condition or undefined
+  console.log(active.level);     // level
+  console.log(active.stats);     // StatsTable
+  console.log(active.boosts);    // BoostsTable
+  console.log(active.volatiles); // volatile statuses
+}
+
+// All party Pokémon
+for (const pokemon of side.pokemon) {
+  console.log(pokemon.species, pokemon.hp);
+}
+
+// Pokémon at a specific slot (1-indexed)
+const lead = side.get(1);
+```
+
+### Accessing move slots
+
+```ts
+const pokemon = side.active!;
+for (const move of pokemon.moves) {
+  console.log(move.id);        // move ID
+  console.log(move.pp);        // remaining PP
+  console.log(move.disabled);  // turns remaining if disabled, else undefined
+}
+
+// Access a specific move slot
+const slot1 = pokemon.move(1);
+```
+
+### The `prng` field
+
+The `prng` field on a `Battle` is a `readonly number[]`. Its format depends on the mode:
+
+- **Showdown mode**: 4 × 16-bit big-endian values (matches Pokémon Showdown's `PRNGSeed`)
+- **Cartridge mode**: 9-tuple of bytes representing the Gen I/II RNG state
+
+## Working with protocol logs
+
+Protocol logging captures structured battle events in a compact binary format during each `update`. To enable it:
+
+1. Build the engine with `-Dlog` (the default npm install already does this).
+2. Set `log: true` in your `CreateOptions` and provide player `name` fields.
+
+After each `update`, `battle.log` is a `DataView` containing the binary log data for that turn.
+
+### Parsing logs
+
+Use `Log.parse()` to decode the binary data into Pokémon Showdown's text protocol format:
+
+```ts
+import {Log, Lookup, Info} from '@pkmn/engine';
+import {Generations} from '@pkmn/data';
+import {Dex} from '@pkmn/dex';
+
+const gens = new Generations(Dex);
+const gen = gens.get(1);
+const info = {
+  p1: {name: 'Player A', team: p1Team},
+  p2: {name: 'Player B', team: p2Team},
+};
+const log = new Log(gen, Lookup.get(gen), info);
+
+// After each battle.update():
+for (const line of log.parse(battle.log!)) {
+  // line.args — positional protocol arguments
+  // line.kwArgs — keyword protocol arguments
+  console.log(line.args[0], line.args.slice(1));
+}
+```
+
+Each yielded `ParsedLine` has an `args` field compatible with `@pkmn/protocol`'s `Protocol.BattleArgType`.
+
+<Note>
+  `battle.log` is only defined when `log: true` was passed to `Battle.create()`. It is `undefined` otherwise. The buffer is reused across updates — read it before calling `update()` again.
+</Note>
+
+## `showdown` mode
+
+When `showdown: true` is set, the engine runs in Pokémon Showdown compatibility mode. This changes:
+
+- **RNG**: Uses Pokémon Showdown's PRNG (Gen V/VI algorithm, 4 × 16-bit seed) instead of the cartridge RNG.
+- **Bug compatibility**: Reproduces Pokémon Showdown's specific misimplementations rather than cartridge bugs.
+- **Choices**: Always returns at least one valid choice (the cartridge can soft-lock due to the Transform + Mirror Move/Metronome PP error).
+
+The engine must be built with `-Dshowdown` to support this mode. By default, `npx install-pkmn-engine` builds with `-Dshowdown`. If you need both modes simultaneously, run the installer twice with different `--options` flags.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Browser / WebAssembly" icon="globe" href="/guides/browser-wasm">
+    Run the engine in the browser using WebAssembly
+  </Card>
+  <Card title="Zig guide" icon="code" href="/guides/zig">
+    Use the engine directly from Zig
+  </Card>
+  <Card title="API reference: Battle" icon="book" href="/api/battle">
+    Complete TypeScript API documentation
+  </Card>
+  <Card title="Protocol" icon="database" href="/concepts/protocol">
+    Deep dive into the binary protocol format
+  </Card>
+</CardGroup>

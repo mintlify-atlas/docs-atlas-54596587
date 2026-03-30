@@ -1,0 +1,178 @@
+---
+title: "Generations"
+description: "Generation support status, data structures for Gen I and Gen II, and how generations are kept isolated in the pkmn engine."
+---
+
+<Warning>
+  The pkmn engine is under active development. Stage 1 (Generation I & II) is currently in progress. Do not depend on this project in production until the v0.1 release.
+</Warning>
+
+## Development stages
+
+The engine is being developed in stages. Infrastructure from Stage 0 is largely complete; battle implementation begins in Stage 1.
+
+| Stage | Deliverables | Status |
+|---|---|---|
+| **0** | Documentation, integration testing, benchmarking, protocol definition | Mostly complete |
+| **1** | Generation I (RBY) and Generation II (GSC) | In progress |
+| **2** | Generation III (ADV) and Generation IV (DPP) | Planned |
+| **3** | Modern generations (Gen V+) | Future — soft-blocked |
+
+Stage 3 is soft-blocked on the availability of high-quality decompilations of the original game code from projects like [pret](https://github.com/orgs/pret/repositories). Broadening support for older generation APIs takes priority over implementing newer generations.
+
+<Note>
+  The following are explicitly out of scope regardless of stage: team/set validation, custom rule enforcement, battle variants other than singles and doubles, and user-facing game socket servers.
+</Note>
+
+## Generational isolation
+
+Each generation is implemented as a fully separate module with its own data structures, RNG, and mechanics. Code is shared across generations only when there is zero overhead.
+
+This means:
+- A Generation I simulation has no branches or data for Generation II concepts
+- Each generation is independently optimized and easy to reason about
+- Some code is duplicated, but binary size is controlled by aggressively pruning data to the minimum required for each generation
+
+Generations are accessed through separate namespaces in the Zig API:
+
+```zig
+const gen1 = pkmn.gen1;
+const gen2 = pkmn.gen2;
+
+var battle = gen1.Battle{ ... };
+var result = try battle.update(c1, c2, &options);
+```
+
+In the TypeScript API, the generation is selected when constructing `Generations`:
+
+```ts
+import {Dex} from '@pkmn/dex';
+import {Generations} from '@pkmn/data';
+
+const gens = new Generations(Dex);
+const gen = gens.get(1); // Only Generation I is currently supported
+```
+
+## Generation I (RBY)
+
+Generation I is the primary focus of Stage 1. The implementation covers the link-battle mechanics of Pokémon Red, Blue, and Yellow, including full Pokémon Showdown compatibility when compiled with `-Dshowdown`.
+
+### Data structures
+
+The following types represent the state of a Generation I battle:
+
+| Type | Description |
+|---|---|
+| `pkmn.gen1.Battle` | The complete battle state for both players, including RNG seed and turn counter |
+| `pkmn.gen1.Side` | One player's side: active Pokémon, party, and last used/selected move tracking |
+| `pkmn.gen1.ActivePokemon` | The in-battle state of the currently active Pokémon — stats, types, boosts, volatiles, and move slots |
+| `pkmn.gen1.Pokemon` | The stored (party) state of an individual Pokémon — permanent stats, moves, HP, status, species, types, level |
+| `pkmn.gen1.MoveSlot` | A `(move, current PP)` pair for one move slot |
+| `pkmn.gen1.Volatiles` | Bit-packed volatile status conditions and associated counters for the active Pokémon |
+| `pkmn.gen1.Stats` | A Pokémon's stat values (HP, Attack, Defense, Speed, Special) |
+| `pkmn.gen1.Boosts` | Stat stage modifiers (Attack, Defense, Speed, Special, Accuracy, Evasion) |
+| `pkmn.gen1.Status` | Bitfield for major status conditions (Sleep duration, Poison, Burn, Freeze, Paralysis) |
+| `pkmn.gen1.DVs` | Determinant values (equivalent to IVs); used when constructing test data |
+| `pkmn.gen1.PRNG` | The Generation I pseudo-random number generator |
+
+The engine separates `ActivePokemon` and `Pokemon` following the same pattern as the cartridge itself. In Pokémon Showdown, all Pokémon use the same `Pokemon` class, with active-only fields prefixed `stored` or `base`. The pkmn engine keeps these distinct to reduce memory and improve cache efficiency.
+
+### Volatile statuses
+
+Generation I has 18 volatile status flags plus associated data. All are cleared when a Pokémon faints or switches out.
+
+<AccordionGroup>
+  <Accordion title="Complete list of Generation I volatile statuses">
+    | pkmn | Pokémon Showdown |
+    |---|---|
+    | `Bide` | `bide` |
+    | `Thrashing` | `lockedmove` |
+    | `MultiHit` | `Move#multihit` |
+    | `Flinch` | `flinch` |
+    | `Charging` | `twoturnmove` |
+    | `Binding` | `partiallytrapped` |
+    | `Invulnerable` | `Move#onLockMove` |
+    | `Confusion` | `confusion` |
+    | `Mist` | `mist` |
+    | `FocusEnergy` | `focusenergy` |
+    | `Substitute` | `substitute` |
+    | `Recharging` | `mustrecharge` |
+    | `Rage` | `rage` |
+    | `LeechSeed` | `leechseed` |
+    | `Toxic` | `toxic` |
+    | `LightScreen` | `lightscreen` |
+    | `Reflect` | `reflect` |
+    | `Transform` | `transform` |
+
+    The `Volatiles` struct also stores associated numeric data: confusion duration, attack counter, Bide accumulated damage (or move accuracy override), Substitute HP, Transform target identity, and Disable move/duration.
+  </Accordion>
+</AccordionGroup>
+
+### Battle layout
+
+The `Battle` struct is 384 bytes (in showdown mode; slightly smaller otherwise). The layout is:
+
+| Bytes | Contents |
+|---|---|
+| 0–183 | Player 1's `Side` |
+| 184–367 | Player 2's `Side` |
+| 368–369 | `turn` (native-endian u16) |
+| 370–371 | `last_damage` |
+| 372–373/375 | `last_moves` (layout varies with `-Dshowdown`) |
+| 374/376–383 | RNG state (10 bytes in cartridge mode, 8-byte seed in showdown mode) |
+
+Each `Side` is 184 bytes, containing 6 × 24-byte `Pokemon` structs, one 32-byte `ActivePokemon`, a 6-byte `order` array, and two move tracking bytes.
+
+Detailed offset tables are available in [`src/data/layout.json`](https://github.com/pkmn/engine/blob/master/src/data/layout.json) for use when writing driver code in other languages.
+
+## Generation II (GSC)
+
+Generation II (Gold, Silver, Crystal) is part of Stage 1. It builds on the Generation I foundation with several additions.
+
+### Additions in Generation II
+
+| Feature | Description |
+|---|---|
+| `pkmn.gen2.Field` | Field-level state including weather |
+| `pkmn.gen2.Weather` | Weather condition (None, Rain, Sun, Sandstorm) |
+| `pkmn.gen2.Gender` | Pokémon gender (required for certain mechanics) |
+| `pkmn.gen2.DVs` | Generation II determinant values (used for gender, Hidden Power type/power, and shiny status) |
+| `pkmn.gen2.Item` | Held items, which affect battle mechanics |
+| `pkmn.gen2.TriAttack` | Tri Attack secondary effect tracking |
+
+Generation II also expands the volatile status set significantly, adding: `Nightmare`, `Curse`, `Protect`, `Foresight`, `PerishSong`, `Endure`, `Rollout`, `Attract`, `DefenseCurl`, `Encore`, `LockOn`, `DestinyBond`, `Underground`, and `Flying`.
+
+The `Battle` structure gains a `Field` for weather. Side conditions (`Safeguard`, `Light Screen`, `Reflect`) are tracked with durations. Pokémon gain `happiness`, `gender`, `item`, and expanded IV fields.
+
+### Generation II data
+
+```zig
+const gen2 = pkmn.gen2;
+
+// Key additions vs Gen I
+gen2.Battle  // Includes Field for weather
+gen2.Field   // Weather ID and duration
+gen2.Weather // None, Rain, Sun, Sandstorm
+gen2.Gender  // M, F, N
+gen2.Item    // Held item identifier
+gen2.DVs     // Gen II IV encoding (gender, HP type/power)
+```
+
+## Per-generation documentation
+
+Detailed implementation notes, layout tables, bug lists, and RNG tables for each generation live alongside the source code:
+
+<CardGroup cols={2}>
+  <Card title="Generation I implementation notes" icon="book" href="https://github.com/pkmn/engine/blob/master/src/lib/gen1/README.md">
+    Data structures, layout, bugs, RNG table, and control flow for RBY
+  </Card>
+  <Card title="Generation II implementation notes" icon="book" href="https://github.com/pkmn/engine/blob/master/src/lib/gen2/README.md">
+    Data structures and implementation details for GSC
+  </Card>
+  <Card title="Design philosophy" icon="compass" href="/concepts/design">
+    Why generations are kept separate
+  </Card>
+  <Card title="Build options" icon="sliders" href="/concepts/build-options">
+    `-Dshowdown` and other compile-time flags
+  </Card>
+</CardGroup>

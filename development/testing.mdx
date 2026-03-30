@@ -1,0 +1,189 @@
+---
+title: "Testing"
+description: "Unit tests, integration tests, and the patched Pokémon Showdown test harness used to verify the pkmn engine."
+---
+
+The pkmn engine has three categories of tests: unit tests, integration tests, and benchmarks. The unit and integration tests live in `src/test/`, while unit tests for the Zig engine itself live alongside the engine source in `src/lib/`.
+
+## Unit tests
+
+Because the engine has multiple build options (such as `-Dshowdown` and `-Dlog`) and Pokémon battles are inherently stochastic, the unit tests require careful setup to be deterministic. Helper types reduce the boilerplate involved.
+
+### The `Test` helper
+
+`Test` is the primary helper type for writing unit tests. A test is initialized with a fixed sequence of RNG rolls and two player teams:
+
+```zig
+var t = Test(rolls).init(p1, p2);
+defer t.deinit();
+```
+
+`Test.deinit()` should be `defer`-ed immediately after initialization to free resources.
+
+After setting up expected updates and logs on the `t.expected` fields, call `t.verify()` to assert the actual battle state matches expectations. When `-Dchance` is enabled, `expectProbability` can be used to check transition probabilities. When both `-Dchance` and `-Dcalc` are enabled, each update is rerun on the original state using the chance actions from the original run as overrides, ensuring all RNG is accounted for.
+
+### `Battle.fixed` and `FixedRNG`
+
+Under the hood, `Test` uses `Battle.fixed` to create a battle with a `FixedRNG` that returns a fixed sequence of results ("rolls"). This gives complete control over whether or not effects occur.
+
+One important constraint: `-Dshowdown` compatibility mode requires a different number and ordering of RNG rolls compared to cartridge mode, so tests must specify both sets of rolls:
+
+```zig
+const rolls = comptime rolls: {
+    // cartridge rolls
+    break :rolls &[_]u8{ 217, 26 };
+};
+const rolls_showdown = comptime rolls: {
+    // showdown rolls differ in count and order
+    break :rolls &[_]u8{ 217, 26, 0 };
+};
+```
+
+At the end of every test, verify that all provided rolls were actually consumed:
+
+```zig
+try expect(battle.rng.exhausted());
+```
+
+Unexpectedly unused rolls indicate a bug. `Test.verify()` performs this check automatically.
+
+### Running unit tests
+
+<Tabs>
+  <Tab title="TypeScript (npm)">
+    ```bash
+    npm test
+    ```
+
+    This runs the TypeScript driver tests under `src/pkg/` using vitest.
+  </Tab>
+  <Tab title="Zig">
+    ```bash
+    zig build test
+    ```
+
+    To run with all build options enabled (recommended):
+
+    ```bash
+    zig build --summary all -Dlog -Dchance -Dcalc test
+    zig build --summary all -Dshowdown -Dlog -Dchance -Dcalc test
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  The Makefile targets `make zig-test` and `make js-test` run the appropriate test suites for each language. `make test` runs both.
+</Note>
+
+## Pokémon Showdown patches
+
+The pkmn engine targets a *patched* version of Pokémon Showdown rather than vanilla Showdown. This is necessary because matching Pokémon Showdown's behavior exactly would require replicating its incorrect architecture — specifically the way its event/handler/action system produces artificial speed ties that cause spurious RNG frame advances. Replicating these architectural issues is out of scope.
+
+Instead, minimal patches are applied to Pokémon Showdown to improve correctness and eliminate unnecessary nondeterminism:
+
+<AccordionGroup>
+  <Accordion title="Speed sort removal in eachEvent and fieldEvent">
+    `Battle#eachEvent` and `Battle#fieldEvent` are patched to not call `Battle#speedSort` in Generation I and II. This causes events to execute in the order they are added, with Player 1's events occurring before Player 2's regardless of speed — effectively restoring the cartridge's default "host" ordering semantics.
+  </Accordion>
+  <Accordion title="BattleQueue#insertChoice host ordering">
+    `BattleQueue#insertChoice` is patched to also obey "host" ordering in Generation I and II, consistent with the `eachEvent`/`fieldEvent` change above.
+  </Accordion>
+  <Accordion title="Handler priorities for speed ties">
+    "Priorities" are added to various handler functions to break speed ties, ensuring that events either produce no unnecessary rolls or are resolved deterministically in the same order as on the cartridge.
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  These patches do **not** fix Pokémon Showdown implementation bugs beyond a subset of speed tie semantics, and they do **not** resolve all unnecessary RNG frame advances from speed ties (for example, moves with a `beforeTurnCallback` may still produce speed tie rolls). They are the minimum changes needed to allow the pkmn engine to reproduce Pokémon Showdown's behavior.
+</Warning>
+
+As a side effect, these patches strictly improve Pokémon Showdown's performance by causing it to perform less sorting and fewer RNG frame advances than vanilla Showdown — effectively "steelmanning" the implementation for benchmarking purposes.
+
+## The `showdown/` test directory
+
+Many of the pkmn engine's unit tests are mirrored in `src/test/showdown/`, which contains:
+
+- `gen1.test.ts`
+- `gen2.test.ts`
+
+These files test the *patched* Pokémon Showdown directly — not the pkmn engine. Engine code is not exercised here. The purpose is to independently verify that the patched Pokémon Showdown produces the specific output the pkmn engine is designed to match.
+
+Pokémon Showdown's own test suite is insufficient for this purpose: it mostly covers the latest generation, does not use a fixed RNG, and does not verify protocol logs — all of which are critical for confirming RNG frame parity and output equivalence.
+
+## Integration tests
+
+The integration test (`src/test/integration.test.ts`) verifies that the pkmn engine compiled with `-Dshowdown` produces output that matches the patched Pokémon Showdown. For each supported generation, both Pokémon Showdown and the pkmn engine are driven by an `ExhaustiveRunner` that attempts to exercise as many different effects as possible in randomly generated battles.
+
+<Note>
+  The pkmn engine must be built with `-Dlog` to enable the binary protocol output required for integration testing.
+</Note>
+
+The binary protocol output from the pkmn engine is not expected to be identical to Pokémon Showdown's text protocol for several reasons:
+
+- The pkmn engine has no concept of a "format" or custom rules
+- Pokémon Showdown's keyword argument ordering is not strictly defined
+- Several Pokémon Showdown protocol messages are redundant or implementation-specific
+- The pkmn engine always returns an omniscient (exact HP) stream
+
+The integration test includes logic to configure Pokémon Showdown appropriately and massage pkmn engine output into a comparable form. When disagreements are found, actual cartridge decompilations serve as the arbiter of correctness.
+
+### Running integration tests
+
+```bash
+npm run test:integration
+```
+
+The integration test also supports a standalone mode for fuzzing:
+
+```bash
+npm run integration -- --duration=15m
+```
+
+### Regression fixtures
+
+Most integration test failures result in new unit tests. The failing logs are saved as fixtures in `src/test/regression/fixtures/` and can be replayed by the regression test suite to guard against future regressions.
+
+## Test writing guidelines
+
+When adding unit tests for new effects, follow these conventions:
+
+1. **Add `generate` support first.** Add support for the new effect to the `generate` tool (`src/tools/generate.ts`), then run `npm run generate -- tests <GEN>` to produce stubs. The generated stubs require cleanup but serve as a useful first draft.
+
+2. **Preserve ordering from previous generations.** Tests should match the ordering of prior generation tests as closely as possible. New effects should be grouped with similar effects. General engine/battle flow tests should be preserved across generations where applicable.
+
+3. **Test all documented behavior.** Cover all behavior described on Bulbapedia and Smogon (without assuming those sources are correct). All reported Pokémon Showdown bugs and documented cartridge glitches should also be tested.
+
+4. **Copy and adapt from prior generations.** Reusing prior generation test cases makes it easy to see what changed versus what stayed the same. Only write a new test from scratch if the behavior has diverged significantly.
+
+5. **Maximize coverage with natural movesets.** Every species, item, move, and ability should appear at least once. Prefer movesets that are natural for the species (signature moves on the correct evolutionary line, etc.).
+
+6. **Match original reproductions.** When testing a known Pokémon Showdown bug or a video-documented glitch, use the same team setup as the original reproduction.
+
+7. **Use default stats.** Most tests should use level 100 Pokémon with full stat experience (Gen I & II) or no Effort Values (Gen III+).
+
+8. **Prefer long, comprehensive test cases.** One test case covering most of an effect's behavior is better than many narrowly scoped tests. Minimizing setup overhead is prioritized over fine-grained isolation.
+
+9. **Isolate complex effect interactions.** For effects that interact with many others (e.g., Substitute, Baton Pass), test the base functionality in the complex effect's own test case. Test interactions with other effects in those other effects' test cases.
+
+10. **Avoid unnecessary rolls.** Use moves like Splash where possible to avoid incidental RNG. Do not set up speed ties unless speed ties are specifically being tested.
+
+11. **Avoid artificial mid-test state changes.** Tests that require a status condition should acquire it naturally during the test. HP and PP should be manipulated before the test begins when needed.
+
+12. **Minimize sub-tests.** Create sub-tests only when a vastly different team setup is required.
+
+13. **Test both battle styles when behavior differs.** If a mechanic behaves differently in single vs. double battles, test both. Otherwise, use a mix across the test file.
+
+<Tip>
+  Both cartridge behavior and `-Dshowdown` behavior must be tested. Use the cartridge roll sequence for one and the Showdown roll sequence for the other.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Benchmarking" icon="gauge" href="/development/benchmarking">
+    Measure battle playout performance and compare against Pokémon Showdown
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/development/contributing">
+    Project structure, code style, and how to submit changes
+  </Card>
+</CardGroup>

@@ -1,0 +1,408 @@
+---
+title: 'C API'
+description: 'Reference for the libpkmn C API (pkmn.h), covering types, functions, constants, and usage patterns for integrating the engine from C or any FFI.'
+---
+
+`libpkmn` exposes a C API via a single header. All symbols are prefixed with `pkmn_` to avoid collisions.
+
+```c
+#include <pkmn.h>
+```
+
+Binary releases are available from the [GitHub releases](https://github.com/pkmn/engine/releases) page, or you can build from source:
+
+```bash
+zig build --prefix /usr/local -Doptimize=ReleaseFast
+```
+
+Use `-Dshowdown` to produce the Pokémon Showdown compatible `libpkmn-showdown` variant. Use `-Dlog` to enable protocol logging.
+
+<Note>
+  The C API intentionally does not expose helpers for creating or populating battle objects. It is designed as a low-level foundation for ergonomic bindings in other languages. For battle initialization, use driver code or one of the [known bindings](#other-language-bindings).
+</Note>
+
+---
+
+## Compile-time options
+
+```c
+typedef struct {
+    bool showdown;
+    bool log;
+    bool chance;
+    bool calc;
+} pkmn_options;
+
+extern const pkmn_options PKMN_OPTIONS;
+```
+
+`PKMN_OPTIONS` exposes the feature flags that `libpkmn` was compiled with at runtime.
+
+---
+
+## Size constants
+
+```c
+extern const size_t PKMN_MAX_CHOICES;   // minimum buffer size for choices
+extern const size_t PKMN_CHOICES_SIZE;  // optimal buffer size for choices
+extern const size_t PKMN_MAX_LOGS;      // minimum buffer size for log data
+extern const size_t PKMN_LOGS_SIZE;     // optimal buffer size for log data
+```
+
+Generation-specific variants are also available:
+
+```c
+extern const size_t PKMN_GEN1_MAX_CHOICES;
+extern const size_t PKMN_GEN1_CHOICES_SIZE;
+extern const size_t PKMN_GEN1_MAX_LOGS;
+extern const size_t PKMN_GEN1_LOGS_SIZE;
+```
+
+Always allocate choice and log buffers using the `_SIZE` constants — they are at least as large as the `MAX_` variants and are rounded to a power of two for allocator efficiency.
+
+---
+
+## Player
+
+```c
+typedef enum pkmn_player {
+    PKMN_PLAYER_P1 = 0,
+    PKMN_PLAYER_P2 = 1,
+} pkmn_player;
+```
+
+---
+
+## Choice
+
+```c
+typedef uint8_t pkmn_choice;
+
+typedef enum pkmn_choice_kind {
+    PKMN_CHOICE_PASS   = 0,
+    PKMN_CHOICE_MOVE   = 1,
+    PKMN_CHOICE_SWITCH = 2,
+} pkmn_choice_kind;
+```
+
+A `pkmn_choice` is a single byte encoding both the choice type and its data. The pass choice is always `0`.
+
+**Functions:**
+
+<ParamField path="pkmn_choice_init(type, data) → pkmn_choice">
+  Creates a choice. `data` must be `<= 6`.
+</ParamField>
+
+<ParamField path="pkmn_choice_type(choice) → pkmn_choice_kind">
+  Extracts the choice kind from a `pkmn_choice`.
+</ParamField>
+
+<ParamField path="pkmn_choice_data(choice) → uint8_t">
+  Extracts the data value from a `pkmn_choice`.
+</ParamField>
+
+---
+
+## Result
+
+```c
+typedef uint8_t pkmn_result;
+
+typedef enum pkmn_result_kind {
+    PKMN_RESULT_NONE  = 0,
+    PKMN_RESULT_WIN   = 1,
+    PKMN_RESULT_LOSE  = 2,
+    PKMN_RESULT_TIE   = 3,
+    PKMN_RESULT_ERROR = 4,
+} pkmn_result_kind;
+```
+
+`PKMN_RESULT_NONE` is guaranteed to be `0`, so a truthiness check on `pkmn_result_type(result)` works as a terminal test.
+
+**Functions:**
+
+<ParamField path="pkmn_result_type(result) → pkmn_result_kind">
+  Returns the terminal status. Non-zero means the battle has ended.
+</ParamField>
+
+<ParamField path="pkmn_result_p1(result) → pkmn_choice_kind">
+  Returns the choice kind required from Player 1 next. Pass this to `pkmn_gen1_battle_choices`.
+</ParamField>
+
+<ParamField path="pkmn_result_p2(result) → pkmn_choice_kind">
+  Returns the choice kind required from Player 2 next.
+</ParamField>
+
+<ParamField path="pkmn_error(result) → bool">
+  Returns `true` if a log buffer overflow error occurred during the update. Only possible when `-Dlog` is enabled and a buffer smaller than `PKMN_MAX_LOGS` was provided.
+</ParamField>
+
+---
+
+## PSRNG
+
+```c
+#define PKMN_PSRNG_SIZE 8
+
+// Opaque 8-byte struct:
+pkmn_psrng;
+
+void     pkmn_psrng_init(pkmn_psrng *psrng, uint64_t seed);
+uint32_t pkmn_psrng_next(pkmn_psrng *psrng);
+```
+
+Pokémon Showdown's RNG, backed by the Generation V & VI algorithm.
+
+---
+
+## Rational
+
+```c
+#define PKMN_RATIONAL_SIZE 16
+
+// Opaque 16-byte struct:
+pkmn_rational;
+
+void      pkmn_rational_init(pkmn_rational *rational);
+void      pkmn_rational_reduce(pkmn_rational *rational);
+float64_t pkmn_rational_numerator(const pkmn_rational *rational);
+float64_t pkmn_rational_denominator(const pkmn_rational *rational);
+```
+
+Used with the `-Dchance` feature to represent probabilities. Lazily reduced — call `pkmn_rational_reduce` before reading.
+
+---
+
+## Generation I battle
+
+### Opaque types
+
+```c
+#define PKMN_GEN1_BATTLE_SIZE           384
+#define PKMN_GEN1_BATTLE_OPTIONS_SIZE   128
+#define PKMN_GEN1_CHANCE_ACTIONS_SIZE    16
+#define PKMN_GEN1_CHANCE_DURATIONS_SIZE   8
+#define PKMN_GEN1_CALC_OVERRIDES_SIZE    24
+#define PKMN_GEN1_CALC_SUMMARIES_SIZE     8
+
+pkmn_gen1_battle;           // 384-byte battle struct
+pkmn_gen1_battle_options;   // 128-byte options struct (fully opaque)
+pkmn_gen1_chance_actions;   // chance actions
+pkmn_gen1_chance_durations; // chance duration counters
+pkmn_gen1_calc_overrides;   // calc RNG override data
+pkmn_gen1_calc_summaries;   // calc damage summary data
+```
+
+`pkmn_gen1_battle` can be stack-allocated at its defined size. Its byte layout matches the Zig struct definition; see `src/lib/gen1/README.md#layout` for the field map. The battle is written in native endianness.
+
+### Options types
+
+```c
+typedef struct {
+    uint8_t *buf;
+    size_t len;
+} pkmn_gen1_log_options;
+
+typedef struct {
+    pkmn_rational           probability;
+    pkmn_gen1_chance_actions  actions;
+    pkmn_gen1_chance_durations durations;
+} pkmn_gen1_chance_options;
+
+typedef struct {
+    pkmn_gen1_calc_overrides overrides;
+} pkmn_gen1_calc_options;
+```
+
+### `pkmn_gen1_battle_options_set`
+
+```c
+void pkmn_gen1_battle_options_set(
+    pkmn_gen1_battle_options       *options,
+    const pkmn_gen1_log_options    *log,
+    const pkmn_gen1_chance_options *chance,
+    const pkmn_gen1_calc_options   *calc);
+```
+
+Initializes or resets the `pkmn_gen1_battle_options` struct. Call this before each update and again after to reset the log stream. Pass `NULL` for any argument you do not need.
+
+<Warning>
+  Resetting the options before the next update (with `NULL` for `log` and `chance`) is required to reuse the log buffer. Forgetting this causes protocol bytes to accumulate and overflow the buffer.
+</Warning>
+
+### Options accessors
+
+```c
+pkmn_rational*              pkmn_gen1_battle_options_chance_probability(const pkmn_gen1_battle_options *options);
+pkmn_gen1_chance_actions*   pkmn_gen1_battle_options_chance_actions(const pkmn_gen1_battle_options *options);
+pkmn_gen1_chance_durations* pkmn_gen1_battle_options_chance_durations(const pkmn_gen1_battle_options *options);
+pkmn_gen1_calc_summaries*   pkmn_gen1_battle_options_calc_summaries(const pkmn_gen1_battle_options *options);
+```
+
+### `pkmn_gen1_battle_update`
+
+```c
+pkmn_result pkmn_gen1_battle_update(
+    pkmn_gen1_battle         *battle,
+    pkmn_choice               c1,
+    pkmn_choice               c2,
+    pkmn_gen1_battle_options *options);
+```
+
+Applies both players' choices to the battle and returns a `pkmn_result`. Pass `NULL` as `options` if no optional features are needed.
+
+<Warning>
+  Passing a choice not present in the output of `pkmn_gen1_battle_choices` is undefined behavior and may corrupt state or crash the engine.
+</Warning>
+
+### `pkmn_gen1_battle_choices`
+
+```c
+uint8_t pkmn_gen1_battle_choices(
+    const pkmn_gen1_battle *battle,
+    pkmn_player             player,
+    pkmn_choice_kind        request,
+    pkmn_choice             out[],
+    size_t                  len);
+```
+
+Fills `out` with valid choices for `player` given `request` (from `pkmn_result_p1` / `pkmn_result_p2`). Returns the number of choices written. Values in `out` beyond the returned count are uninitialized.
+
+May return `0` in cartridge mode due to the Transform + Mirror Move/Metronome PP error interacting with Disable (soft-lock). Always returns `> 0` in Showdown mode.
+
+---
+
+## Other language bindings
+
+For languages other than C, writing bindings against `libpkmn` is relatively straightforward. The `src/data/` directory contains JSON dumps of all Pokémon data, structure sizes and offsets, and protocol information used by the reference driver code.
+
+| Language | License | URL |
+|---|---|---|
+| **C++** | `BSL-1.0` | https://github.com/pasyg/wrapsire |
+| **Python** | `MIT` | https://github.com/AnnikaCodes/PyKMN |
+
+---
+
+## Full example
+
+```c
+#include <assert.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <pkmn.h>
+
+pkmn_choice choose(
+   pkmn_gen1_battle *battle,
+   pkmn_psrng *random,
+   pkmn_player player,
+   pkmn_choice_kind request,
+   pkmn_choice choices[])
+{
+   uint8_t n = pkmn_gen1_battle_choices(battle, player, request, choices, PKMN_CHOICES_SIZE);
+   // Technically due to Generation I's Transform + Mirror Move/Metronome PP
+   // error if the battle contains Pokémon with a combination of Transform,
+   // Mirror Move/Metronome, and Disable its possible that there are no
+   // available choices (softlock), though this is impossible here given that
+   // our example battle involves none of these moves
+   assert(n > 0);
+   // pkmn_gen1_battle_choices determines what the possible choices are - the
+   // simplest way to choose an option here is to just use the PSRNG to pick one
+   // at random
+   return choices[(uint64_t)pkmn_psrng_next(random) * n / 0x100000000];
+}
+
+int main(int argc, char **argv)
+{
+   if (argc != 2) {
+      fprintf(stderr, "Usage: %s <seed>\n", argv[0]);
+      return 1;
+   }
+
+   // Expect that we have been given a decimal seed as our only argument
+   char *end = NULL;
+   uint64_t seed = strtoul(argv[1], &end, 10);
+   if (errno) {
+      fprintf(stderr, "Invalid seed: %s\n", argv[1]);
+      fprintf(stderr, "Usage: %s <seed>\n", argv[0]);
+      return 1;
+   }
+
+   // We could use C's srand() and rand() function but for point of example
+   // we will demonstrate how to use the PSRNG that is exposed by libpkmn
+   pkmn_psrng random;
+   pkmn_psrng_init(&random, seed);
+   // Preallocate a small buffer for the choice options throughout the battle
+   pkmn_choice choices[PKMN_CHOICES_SIZE];
+
+   // libpkmn doesn't provide any helpers for initializing the battle structure
+   // (the library is intended to be wrapped by something with a higher level
+   // API). This setup borrows the serialized state of the setup from the Zig
+   // example, though will end up with a different result because it's using a
+   // different RNG
+   pkmn_gen1_battle battle = { {
+      0x25, 0x01, 0xc4, 0x00, 0xc4, 0x00, 0xbc, 0x00, 0xe4, 0x00, 0x4f, 0x18, 0x0e, 0x30, 0x4b, 0x28,
+      /* ... (384 bytes total) ... */
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x2e, 0xdb, 0x7d, 0x61, 0xcb, 0xba, 0x0d, 0x1e, 0x7e, 0x9e, 0x00,
+   } };
+
+   // Preallocate a buffer for protocol message logs - PKMN_LOGS_SIZE is
+   // guaranteed to be large enough for a single update. This will only be
+   // written to if -Dlog is enabled - NULL can be used to turn all of the
+   // logging into no-ops
+   uint8_t buf[PKMN_LOGS_SIZE];
+   pkmn_gen1_log_options log_options = {.buf = buf, .len = PKMN_LOGS_SIZE};
+
+   // Initialize the battle options with the log options (in this example
+   // the chance and calc features are not demonstrated and thus we simply
+   // pass NULL). If no optional features are desired (or if they weren't
+   // enabled at compile time) the options struct is unnecessary - we can
+   // simply pass NULL as the last argument to the update function
+   pkmn_gen1_battle_options options;
+   pkmn_gen1_battle_options_set(&options, &log_options, NULL, NULL);
+
+   pkmn_result result;
+   // Pedantically these *should* be pkmn_choice_init(PKMN_CHOICE_PASS, 0), but
+   // libpkmn commits to always ensuring the pass choice is 0 so we can simplify
+   // things here
+   pkmn_choice c1 = 0, c2 = 0;
+   // We're also taking advantage of the fact that the PKMN_RESULT_NONE is
+   // guaranteed to be 0, so we don't actually need to check against it here
+   while (!pkmn_result_type(result = pkmn_gen1_battle_update(&battle, c1, c2, &options))) {
+      // If -Dlog is enabled we would now do something with the data in `buf`
+      // before coming up with our next set of choices
+      c1 = choose(&battle, &random, PKMN_PLAYER_P1, pkmn_result_p1(result), choices);
+      c2 = choose(&battle, &random, PKMN_PLAYER_P2, pkmn_result_p2(result), choices);
+      // We need to reset our options struct after each update, in this case
+      // to reset the log stream before it gets written to again. The middle
+      // two arguments (for log and chance, respectively) should almost always
+      // be NULL for resets, but the final argument may be used for calc
+      // overrides. If you have no battle options then this can be skipped
+      pkmn_gen1_battle_options_set(&options, NULL, NULL, NULL);
+   }
+   // The only error that can occur is if we didn't provide a large enough
+   // buffer, but PKMN_MAX_LOGS is guaranteed to be large enough so errors here
+   // are impossible. Note however that this is tracking a different kind of
+   // error than PKMN_RESULT_ERROR
+   assert(!pkmn_error(result));
+
+   // The battle is written in native endianness so we need to do a bit-hack to
+   // figure out the system's endianness before we can read the 16-bit turn data
+   volatile uint32_t endian = 0x01234567;
+   uint16_t turns = (*((uint8_t *)(&endian))) == 0x67
+      ? battle.bytes[368] | battle.bytes[369] << 8
+      : battle.bytes[368] << 8 | battle.bytes[369];
+
+   // The result is from the perspective of P1
+   const char* outcome[] = {
+       "won by Player A",
+       "won by Player B",
+       "ended in a tie",
+       "encountered an error"
+   };
+   printf("Battle %s after %d turns\n", outcome[pkmn_result_type(result) - 1], turns);
+   return 0;
+}
+```

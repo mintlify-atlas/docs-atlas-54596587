@@ -1,0 +1,74 @@
+---
+title: "Introduction"
+description: "A minimal, complete Pokémon battle simulation engine optimized for performance"
+---
+
+## What is pkmn/engine?
+
+`pkmn/engine` is a high-performance Pokémon battle simulation engine written in [Zig](https://ziglang.org/), with first-class TypeScript/JavaScript bindings and a C API for use in other languages. It is designed for tooling, embedded systems, and artificial intelligence use cases where raw simulation speed is critical.
+
+The engine is **more than 1000× faster** than [Pokémon Showdown](https://pokemonshowdown.com/) when playing out supported formats in compatibility mode. It is frame-accurate and [bug-for-bug compatible](http://www.catb.org/jargon/html/B/bug-for-bug-compatible.html) with both the original Pokémon game cartridges and the Pokémon Showdown simulator.
+
+<Warning>
+  This project is under active development. The `main` branch contains breaking changes that may not be fully documented. Wait for the forthcoming v0.1 release before depending on this project in production.
+</Warning>
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Extreme performance" icon="bolt">
+    Over 1000× faster than Pokémon Showdown in compatibility mode, built with data-oriented design and zero dynamic memory allocation.
+  </Card>
+  <Card title="Multi-language support" icon="code">
+    Use the engine from TypeScript/JavaScript, Zig, C, or WebAssembly. Official bindings ship with the package.
+  </Card>
+  <Card title="Frame-accurate simulation" icon="check">
+    Bug-for-bug compatible with Gen I & II cartridges and Pokémon Showdown (via `-Dshowdown` flag).
+  </Card>
+  <Card title="AI & tooling ready" icon="robot">
+    Deterministic RNG control via `FixedRNG`, probability tracking, and damage calc support for building AI agents.
+  </Card>
+  <Card title="Binary protocol" icon="database">
+    Optional high-performance binary wire protocol for battle logs, with tools to convert to human-readable formats.
+  </Card>
+  <Card title="Embeddable" icon="microchip">
+    No dynamic allocation, fixed-size buffers, and minimal dependencies make it ideal for embedded and constrained environments.
+  </Card>
+</CardGroup>
+
+## How it works
+
+The engine exposes a minimal API centered on two operations:
+
+1. **`update(c1, c2)`** — Advance the battle state given both players' choices. Returns a `Result` indicating whether the battle ended and which types of choices are valid next.
+2. **`choices(player, result)`** — Enumerate all valid choices for a player at the current decision point.
+
+This design allows the engine to be driven entirely by code — there is no streaming, no async I/O, and no string-based protocol overhead in the hot path.
+
+## What the engine is not
+
+The pkmn engine is a **low-level library**, not a fully featured simulator. The following are explicitly out of scope:
+
+- Team or set validation
+- Custom rule ("format") enforcement
+- Battle variants other than single (full) or double battles
+- User-facing game socket servers or input validation
+
+These concerns are left to higher-level code built on top of the engine.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get a battle running in under 5 minutes with TypeScript
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the npm package, native library, or Zig package
+  </Card>
+  <Card title="Guides" icon="book" href="/guides/typescript">
+    Detailed walkthroughs for TypeScript, Zig, C, and the browser
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/battle">
+    Complete TypeScript and Zig/C API documentation
+  </Card>
+</CardGroup>

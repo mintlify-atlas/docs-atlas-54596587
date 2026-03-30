@@ -1,0 +1,286 @@
+---
+title: "Installation"
+description: "Install pkmn/engine as an npm package, a native C library, or a Zig package"
+---
+
+`pkmn/engine` can be consumed in three ways depending on your language and use case:
+
+- **`@pkmn/engine`** — TypeScript/JavaScript driver published to npm, backed by a native Node addon or WASM
+- **`libpkmn`** — compiled C library for use from C, C++, Python, or any language with a C FFI
+- **`pkmn`** — Zig package for use directly in Zig projects via `build.zig.zon`
+
+<Warning>
+  Only the Zig **master branch** is currently supported. The engine tracks upstream Zig closely and the minimum stable release may not yet be sufficient. Check [ziglang.org](https://ziglang.org/learn/getting-started/) for instructions on installing the master branch build for your platform.
+</Warning>
+
+<Tabs>
+  <Tab title="@pkmn/engine (npm)">
+
+    ## Install with npm
+
+    ```bash
+    npm install @pkmn/engine
+    ```
+
+    This installs the `@pkmn/engine` TypeScript driver. You will also need `@pkmn/dex` and `@pkmn/data` to provide Pokémon data:
+
+    <CodeGroup>
+
+    ```bash npm
+    npm install @pkmn/engine @pkmn/dex @pkmn/data
+    ```
+
+    ```bash yarn
+    yarn add @pkmn/engine @pkmn/dex @pkmn/data
+    ```
+
+    ```bash pnpm
+    pnpm add @pkmn/engine @pkmn/dex @pkmn/data
+    ```
+
+    </CodeGroup>
+
+    ## Postinstall script
+
+    When you install `@pkmn/engine`, a [`postinstall` lifecycle script](https://docs.npmjs.com/cli/v8/using-npm/scripts) runs `install-pkmn-engine` automatically. This script:
+
+    1. Checks for a compatible Zig compiler on your `PATH`
+    2. Downloads one to `node_modules/@pkmn/engine/build/bin` if none is found
+    3. Downloads the required Node headers if needed
+    4. Builds the native Node addon and places it in `node_modules/@pkmn/engine/build/lib`
+
+    The driver requires these compiled addons to function. Without them, calls to `Battle.create()` will throw.
+
+    <Note>
+      If you install with `--ignore-scripts`, the postinstall step is skipped. Run `npx install-pkmn-engine` manually afterward to build the addon. You can also pass `--options` to override the default build configuration:
+
+      ```bash
+      npx install-pkmn-engine --options='-Dshowdown -Dlog'
+      ```
+    </Note>
+
+    ## Build options
+
+    By default, `install-pkmn-engine` builds the addon with `-Dshowdown` (Pokémon Showdown compatibility mode). You can build additional configurations alongside the default — the driver supports both Showdown-compatible and cartridge-accurate builds simultaneously if both are present.
+
+    To enable protocol message logging in addition to Showdown mode:
+
+    ```bash
+    npx install-pkmn-engine --options='-Dshowdown -Dlog'
+    ```
+
+    <Note>
+      Protocol logs will only be written if the engine was built with `-Dlog` **and** the battle was created with `log: true`. Both conditions must be met.
+    </Note>
+
+    ## Browser / WebAssembly
+
+    The driver is designed to work in browsers via WebAssembly. The `browser` field in `package.json` redirects the native Node addon import to the WASM implementation automatically when bundled for the browser.
+
+    In browser environments, call `initialize()` before creating any battles:
+
+    ```ts
+    import { initialize, Battle } from '@pkmn/engine';
+
+    await initialize(true); // true = Showdown compatibility mode
+    const battle = Battle.create(gen, options);
+    ```
+
+    Run `npm run start:web` from the `examples/js` directory to see a live browser demo.
+
+  </Tab>
+
+  <Tab title="libpkmn (native library)">
+
+    ## Download a prebuilt binary
+
+    Prebuilt binaries for `libpkmn` and `libpkmn-showdown` are available on the [GitHub releases page](https://github.com/pkmn/engine/releases).
+
+    <Note>
+      The binary releases of both `libpkmn` and `libpkmn-showdown` are compiled with `-Dlog` enabled by default. This means protocol message logging is always available without needing to rebuild from source.
+    </Note>
+
+    ## Build from source
+
+    To build `libpkmn` from source, download the repository and run `zig build`:
+
+    ```bash
+    curl -L https://github.com/pkmn/engine/archive/refs/heads/main.zip -o engine.zip
+    unzip engine.zip
+    cd engine
+    zig build --prefix /usr/local -Doptimize=ReleaseFast
+    ```
+
+    ### Build flags
+
+    | Flag | Effect |
+    |------|--------|
+    | `-Doptimize=ReleaseFast` | Optimized release build (recommended for production) |
+    | `-Dshowdown` | Build `libpkmn-showdown` for Pokémon Showdown compatibility |
+    | `-Dlog` | Enable binary protocol message logging |
+
+    Build with Showdown compatibility and logging enabled:
+
+    ```bash
+    zig build --prefix /usr/local -Doptimize=ReleaseFast -Dshowdown -Dlog
+    ```
+
+    ## C API
+
+    `libpkmn` exposes a C API via [`src/include/pkmn.h`](https://github.com/pkmn/engine/blob/master/src/include/pkmn.h). All symbols are prefixed with `pkmn_` to avoid name collisions.
+
+    ```c
+    #include <pkmn.h>
+
+    pkmn_gen1_battle_options options;
+    pkmn_gen1_battle_options_set(&options, &log_options, NULL, NULL);
+
+    pkmn_result result;
+    pkmn_choice c1 = 0, c2 = 0;
+    while (!pkmn_result_type(result = pkmn_gen1_battle_update(&battle, c1, c2, &options))) {
+        c1 = choose(&battle, &random, PKMN_PLAYER_P1, pkmn_result_p1(result), choices);
+        c2 = choose(&battle, &random, PKMN_PLAYER_P2, pkmn_result_p2(result), choices);
+        pkmn_gen1_battle_options_set(&options, NULL, NULL, NULL);
+    }
+    if (pkmn_error(result)) return 1;
+    ```
+
+    See [`examples/c/example.c`](https://github.com//pkmn/engine/blob/master/examples/c/example.c) for a fully commented working example.
+
+    <Note>
+      The C API does not export helpers for constructing the opaque battle struct. It is intended as a foundation for higher-level bindings in other languages. Refer to the JSON data in [`src/data`](https://github.com/pkmn/engine/tree/master/src/data) for struct sizes, offsets, and protocol information.
+    </Note>
+
+  </Tab>
+
+  <Tab title="pkmn (Zig package)">
+
+    ## Add to build.zig.zon
+
+    Add `pkmn` as a dependency in your project's `build.zig.zon` using Zig's package management system. Replace `RELEASE` with the tag or commit hash you want to pin:
+
+    ```zig
+    .dependencies = .{
+        .pkmn = .{
+            .url = "https://github.com/pkmn/engine/archive/RELEASE.tar.gz",
+        },
+    },
+    ```
+
+    ## Get the hash
+
+    Run `zig build`. The compiler will error and print the expected hash:
+
+    ```
+    error: dependency is missing hash field
+                .url = "https://github.com/pkmn/engine/archive/nightly.tar.gz",
+                       ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    note: expected .hash = "122056b93b403033cb7d9bed96a02c2eb8cc1275515976167726ada6eb4207e8ef8a",
+    ```
+
+    Copy the printed hash into your `build.zig.zon` alongside `.url`:
+
+    ```zig
+    .dependencies = .{
+        .pkmn = .{
+            .url = "https://github.com/pkmn/engine/archive/nightly.tar.gz",
+            .hash = "122056b93b403033cb7d9bed96a02c2eb8cc1275515976167726ada6eb4207e8ef8a",
+        },
+    },
+    ```
+
+    <Note>
+      The `.hash` value is a content hash of the archive, **not** the Git commit hash. It will differ from anything shown on GitHub.
+    </Note>
+
+    ## Import in build.zig
+
+    After adding the hash, import the `pkmn` package's build helpers in your `build.zig` and add it as a module:
+
+    ```zig
+    const std = @import("std");
+
+    pub fn build(b: *std.Build) void {
+        // ... your existing build setup ...
+        const pkmn = b.dependency("pkmn", .{ .showdown = true, .log = true });
+        exe.root_module.addImport("pkmn", pkmn.module("pkmn"));
+    }
+    ```
+
+    ## Build options
+
+    The `pkmn` package accepts build options as comptime parameters to `b.dependency()`:
+
+    | Option | Type | Effect |
+    |--------|------|--------|
+    | `.showdown` | `bool` | Enable Pokémon Showdown compatibility mode |
+    | `.log` | `bool` | Enable binary protocol message logging |
+
+    Alternatively, set options via a `pkmn_options` root source file declaration in your Zig code:
+
+    ```zig
+    pub const pkmn_options = .{ .showdown = true, .log = true };
+    ```
+
+    ## Usage example
+
+    ```zig
+    const std = @import("std");
+    const pkmn = @import("pkmn");
+
+    var prng: std.Random.DefaultPrng = .init(seed);
+    var random = prng.random();
+    var choices: [pkmn.CHOICES_SIZE]pkmn.Choice = undefined;
+
+    var battle = pkmn.gen1.helpers.Battle.init(random.int(u64), &.{
+        .{ .species = .Bulbasaur, .moves = &.{ .SleepPowder, .SwordsDance, .RazorLeaf, .BodySlam } },
+        // ... more Pokémon
+    }, &.{
+        .{ .species = .Tauros, .moves = &.{ .BodySlam, .HyperBeam, .Blizzard, .Earthquake } },
+        // ... more Pokémon
+    });
+
+    var buf: [pkmn.LOGS_SIZE]u8 = undefined;
+    var writer: pkmn.protocol.Writer = .{ .buffer = &buf };
+    var options = pkmn.battle.options(
+        pkmn.protocol.FixedLog{ .writer = &writer },
+        pkmn.gen1.chance.NULL,
+        pkmn.gen1.calc.NULL,
+    );
+
+    var c1: pkmn.Choice = .{};
+    var c2: pkmn.Choice = .{};
+
+    var result = try battle.update(c1, c2, &options);
+    while (result.type == .None) : (result = try battle.update(c1, c2, &options)) {
+        const n1 = random.uintLessThan(u8, battle.choices(.P1, result.p1, &choices));
+        c1 = choices[n1];
+        const n2 = random.uintLessThan(u8, battle.choices(.P2, result.p2, &choices));
+        c2 = choices[n2];
+        writer.reset();
+    }
+
+    std.debug.print("{}\n", .{result.type});
+    ```
+
+    See [`examples/zig/example.zig`](https://github.com/pkmn/engine/blob/master/examples/zig/example.zig) for the fully commented working example.
+
+  </Tab>
+</Tabs>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first battle in TypeScript in under five minutes
+  </Card>
+  <Card title="TypeScript guide" icon="code" href="/guides/typescript">
+    Teams, logging, browser usage, and `Battle.restore()`
+  </Card>
+  <Card title="Zig guide" icon="wrench" href="/guides/zig">
+    Using the `pkmn` Zig package, `FixedRNG`, and build options
+  </Card>
+  <Card title="C guide" icon="terminal" href="/guides/c">
+    Writing bindings against `libpkmn` using the C API
+  </Card>
+</CardGroup>

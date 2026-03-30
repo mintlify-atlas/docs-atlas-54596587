@@ -1,0 +1,159 @@
+---
+title: "Browser / WebAssembly"
+description: "How to use @pkmn/engine in the browser via WebAssembly, including bundler setup, async initialization, and the differences from Node usage."
+---
+
+## Overview
+
+`@pkmn/engine` is designed to work in browsers that support [WebAssembly](https://webassembly.org/). Instead of the native Node addon, the browser build uses a `.wasm` binary that is loaded and instantiated at runtime. The package handles most of this transparently — the same TypeScript API works in both Node and the browser.
+
+<Note>
+  WebAssembly is supported in all modern browsers (Chrome 57+, Firefox 52+, Safari 11+, Edge 16+). The engine does not use any browser-specific APIs beyond WebAssembly and `fetch`.
+</Note>
+
+## How the browser redirect works
+
+The `@pkmn/engine` package includes a `browser` field in its `package.json` that remaps the Node addon module to the browser-safe WASM loader:
+
+```
+addon/node.js  →  addon/browser.js  (in browsers)
+```
+
+Bundlers that respect the `browser` field in `package.json` — including **webpack**, **Vite**, **esbuild**, **Parcel**, and **Rollup** — apply this redirect automatically. No additional configuration is required for standard setups.
+
+The browser entry point (`addon/browser.ts`) loads the appropriate `.wasm` file by name using `fetch`:
+
+- `pkmn.wasm` — cartridge mode
+- `pkmn-showdown.wasm` — Pokémon Showdown compatibility mode
+
+You must serve this `.wasm` file from the same origin as your application (or configure CORS headers if serving from a CDN). The npm package includes both `.wasm` files in `build/lib/`.
+
+## Initializing in the browser
+
+In Node, the native addon loads synchronously on first use. In the browser, WASM must be fetched and compiled asynchronously, so you must call `initialize()` before using `Battle` or any other engine APIs:
+
+```ts
+import {initialize, Battle} from '@pkmn/engine';
+
+// Must be called before Battle.create() in the browser
+await initialize(true); // true = Pokémon Showdown compatibility mode
+
+// Now safe to use Battle
+const battle = Battle.create(gen, options);
+```
+
+Calling `initialize()` more than once with the same `showdown` value throws an error. Call it once at application startup.
+
+### Conditional initialization
+
+The example code checks whether it's running in Node or the browser and only calls `initialize` in the browser:
+
+```ts
+if ('process' in globalThis) {
+  // Node: addon loads synchronously, no initialization needed
+  play();
+} else {
+  // Browser: must initialize before using the engine
+  initialize(options.showdown).then(play).catch(console.error);
+}
+```
+
+## Running the browser demo
+
+The [`examples/js`](https://github.com/pkmn/engine/tree/master/examples/js) directory includes a browser-compatible example. To run it:
+
+```bash
+cd examples/js
+npm install
+npm run start:web
+```
+
+This starts a Vite development server. Open the URL it prints in your browser to see the engine running in the browser.
+
+<Note>
+  The `start:web` script uses Vite. You can also run `npm run start:parcel` to use Parcel instead — both are pre-configured in the example's `package.json`.
+</Note>
+
+## Bundler configuration
+
+### Vite
+
+No extra configuration is required. Vite respects the `browser` field in `package.json` and handles `.wasm` files automatically in modern versions.
+
+You need to ensure the `.wasm` file is served correctly. The example's `vite.config.mts` handles this. Copy the `.wasm` file to your public directory:
+
+```bash
+cp node_modules/@pkmn/engine/build/lib/pkmn-showdown.wasm public/
+```
+
+### Parcel
+
+Parcel also respects the `browser` field. The example uses `parcel-reporter-static-files-copy` to copy the `.wasm` file to the output directory automatically, configured in `.parcelrc` and `package.json`:
+
+```json
+{
+  "staticFiles": {
+    "staticPath": "node_modules/@pkmn/engine/build/lib/pkmn-showdown.wasm"
+  }
+}
+```
+
+### webpack / esbuild
+
+Both respect the `browser` field. Configure your bundler to copy the `.wasm` file to your output directory and ensure it is served with the `application/wasm` MIME type.
+
+## Passing a custom WASM source
+
+`initialize()` accepts an optional second argument to customize how the WASM module is loaded:
+
+```ts
+// Load from a custom URL
+await initialize(true, new URL('/assets/pkmn-showdown.wasm', location.href));
+
+// Use a pre-fetched Response
+await initialize(true, fetch('/assets/pkmn-showdown.wasm'));
+
+// Use a pre-compiled module
+const module = await WebAssembly.compileStreaming(fetch('/assets/pkmn-showdown.wasm'));
+await initialize(true, module);
+
+// Use an already-instantiated instance
+await initialize(true, instance);
+```
+
+If no second argument is provided, the loader fetches `pkmn.wasm` or `pkmn-showdown.wasm` from the current origin.
+
+## Differences from Node usage
+
+| Aspect | Node | Browser |
+|---|---|---|
+| Addon type | Native `.node` file | WebAssembly `.wasm` file |
+| Loading | Synchronous (automatic) | Asynchronous (`await initialize()`) |
+| Performance | Fastest (native code) | Fast (near-native via WASM JIT) |
+| Battle API | Identical | Identical |
+| Protocol logs | Identical | Identical |
+
+The `Battle`, `Choice`, `Result`, `Log`, and other API types are identical in both environments. All code that works in Node also works in the browser after initialization.
+
+## Performance considerations
+
+WebAssembly performance is close to native, but there is overhead from copying the battle state between JavaScript's heap and the WASM linear memory on each `update` call. For most use cases this is negligible, but in tight AI training loops where millions of battles are simulated, using the Zig or Node APIs directly will be faster.
+
+The WASM binary is compiled with `-Doptimize=ReleaseFast` in the npm release, so it is fully optimized.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="TypeScript guide" icon="code" href="/guides/typescript">
+    Full TypeScript API reference including the battle loop
+  </Card>
+  <Card title="Zig guide" icon="zap" href="/guides/zig">
+    Maximum performance with the native Zig package
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Install @pkmn/engine and configure the addon
+  </Card>
+  <Card title="Build options" icon="settings" href="/concepts/build-options">
+    Understand the -Dshowdown, -Dlog, and other flags
+  </Card>
+</CardGroup>

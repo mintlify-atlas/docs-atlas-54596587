@@ -1,122 +1,92 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "pkmn/engine",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#ea242c",
+    "light": "#929292",
+    "dark": "#0d0809"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "https://media.brand.dev/5eeb01b8-1b0a-4d4d-b611-f99ff78b0c9a.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/pkmn/engine"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/pkmn/engine"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Guides",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "guides/typescript",
+              "guides/zig",
+              "guides/c",
+              "guides/browser-wasm"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Concepts",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "concepts/design",
+              "concepts/protocol",
+              "concepts/build-options",
+              "concepts/generations"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Testing & Development",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "development/testing",
+              "development/benchmarking",
+              "development/contributing"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "TypeScript API",
             "pages": [
-              "api-reference/introduction"
+              "api/battle",
+              "api/choices-result",
+              "api/protocol-log",
+              "api/data-lookup"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Zig & C API",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/zig-api",
+              "api/c-api"
+            ]
+          },
+          {
+            "group": "Tools",
+            "pages": [
+              "api/pkmn-debug"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

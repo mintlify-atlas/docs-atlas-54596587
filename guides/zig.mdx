@@ -1,0 +1,374 @@
+---
+title: "Zig"
+description: "Complete guide to using the pkmn Zig package, covering package setup, battle initialization helpers, the update loop, logging, and advanced features like FixedRNG, Chance, and Calc."
+---
+
+## Overview
+
+The `pkmn` Zig package exposes the engine directly with full access to all types and optional features. It is the most capable interface and is recommended when you need deterministic control, probability tracking, or damage calculation support.
+
+<Warning>
+  The engine currently requires the Zig **master branch** due to upstream breaking changes. Zig v0.14.0 support is planned but not yet available.
+</Warning>
+
+## Adding the package
+
+<Steps>
+  <Step title="Add pkmn to build.zig.zon">
+    Add the package as a dependency in your project's `build.zig.zon`:
+
+    ```zig
+    .dependencies = .{
+        .pkmn = .{
+            .url = "https://github.com/pkmn/engine/archive/RELEASE.tar.gz",
+        },
+    },
+    ```
+
+    Replace `RELEASE` with the tag for the [release](https://github.com/pkmn/engine/releases) you want to use (e.g. `0.1.0` or `nightly`), or the specific commit hash.
+  </Step>
+  <Step title="Get the expected hash">
+    Run `zig build`. The compiler will error with the expected hash:
+
+    ```bash
+    $ zig build
+    error: dependency is missing hash field
+                .url = "https://github.com/pkmn/engine/archive/nightly.tar.gz",
+                       ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    note: expected .hash = "122056b93b403033cb7d9bed96a02c2eb8cc1275515976167726ada6eb4207e8ef8a",
+    ```
+
+    Copy the hash into your `build.zig.zon` alongside the `.url`.
+
+    <Note>
+      This hash is **not** the same as the Git commit hash. It is a hash of the archive contents.
+    </Note>
+  </Step>
+  <Step title="Import the package in build.zig">
+    Configure the package in your `build.zig` and add it as an import to your executable:
+
+    ```zig
+    const std = @import("std");
+
+    pub fn build(b: *std.Build) void {
+        const target = b.standardTargetOptions(.{});
+        const optimize = b.standardOptimizeOption(.{});
+
+        const showdown =
+            b.option(bool, "showdown", "Enable Pokémon Showdown compatibility mode") orelse false;
+        const log = b.option(bool, "log", "Enable protocol message logging") orelse false;
+
+        const exe = b.addExecutable(.{
+            .name = "example",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("example.zig"),
+                .optimize = optimize,
+                .target = target,
+            }),
+        });
+        const pkmn = b.dependency("pkmn", .{ .showdown = showdown, .log = log });
+        exe.root_module.addImport("pkmn", pkmn.module("pkmn"));
+        b.installArtifact(exe);
+    }
+    ```
+  </Step>
+</Steps>
+
+## Build options
+
+Pass these flags to `zig build` to configure the package:
+
+| Flag | Description |
+|---|---|
+| `-Dshowdown` | Enable Pokémon Showdown compatibility mode (changes RNG and bug behavior) |
+| `-Dlog` | Enable binary protocol message logging |
+| `-Dchance` | Enable probability tracking for chance outcomes |
+| `-Dcalc` | Enable damage calculation support |
+
+You can also set options via a `pkmn_options` root source file declaration instead of build flags:
+
+```zig
+pub const pkmn_options = .{ .showdown = true, .log = true };
+```
+
+<Warning>
+  There are additional undocumented internal options that can be set via build or root options. These are unsupported, affect correctness, and may change without warning.
+</Warning>
+
+## Initializing a battle
+
+### Using helpers
+
+`pkmn.gen1.helpers.Battle.init` fills in missing fields with intelligent defaults and is the recommended way to initialize a battle for most use cases:
+
+```zig
+const std = @import("std");
+const pkmn = @import("pkmn");
+
+var battle = pkmn.gen1.helpers.Battle.init(
+    random.int(u64),
+    &.{
+        .{ .species = .Bulbasaur, .moves = &.{ .SleepPowder, .SwordsDance, .RazorLeaf, .BodySlam } },
+        .{ .species = .Charmander, .moves = &.{ .FireBlast, .FireSpin, .Slash, .Counter } },
+        .{ .species = .Squirtle, .moves = &.{ .Surf, .Blizzard, .BodySlam, .Rest } },
+        .{ .species = .Pikachu, .moves = &.{ .Thunderbolt, .ThunderWave, .Surf, .SeismicToss } },
+        .{ .species = .Rattata, .moves = &.{ .SuperFang, .BodySlam, .Blizzard, .Thunderbolt } },
+        .{ .species = .Pidgey, .moves = &.{ .DoubleEdge, .QuickAttack, .WingAttack, .MirrorMove } },
+    },
+    &.{
+        .{ .species = .Tauros, .moves = &.{ .BodySlam, .HyperBeam, .Blizzard, .Earthquake } },
+        .{ .species = .Chansey, .moves = &.{ .Reflect, .SeismicToss, .SoftBoiled, .ThunderWave } },
+        .{ .species = .Snorlax, .moves = &.{ .BodySlam, .Reflect, .Rest, .IceBeam } },
+        .{ .species = .Exeggutor, .moves = &.{ .SleepPowder, .Psychic, .Explosion, .DoubleEdge } },
+        .{ .species = .Starmie, .moves = &.{ .Recover, .ThunderWave, .Blizzard, .Thunderbolt } },
+        .{ .species = .Alakazam, .moves = &.{ .Psychic, .SeismicToss, .ThunderWave, .Recover } },
+    },
+);
+```
+
+The `pkmn.gen2.helpers` namespace provides the equivalent for Generation II.
+
+### Direct initialization
+
+For advanced use cases, you can initialize `pkmn.gen1.Battle` directly. The battle must have `turn = 0` and a zeroed active Pokémon slot to represent a fresh start — the helpers handle this automatically.
+
+## Pre-allocating buffers
+
+Allocate choice and log buffers once before the battle loop using the provided constants:
+
+```zig
+// Buffer for choice enumeration — reused each turn
+var choices: [pkmn.CHOICES_SIZE]pkmn.Choice = undefined;
+
+// Buffer for protocol log output — reused each turn
+var buf: [pkmn.LOGS_SIZE]u8 = undefined;
+```
+
+`pkmn.CHOICES_SIZE` and `pkmn.LOGS_SIZE` are guaranteed to be large enough for a single update. Generation-specific constants (`pkmn.gen1.CHOICES_SIZE`, `pkmn.gen1.LOGS_SIZE`) are also available.
+
+## Configuring battle options
+
+Create a `battle.options` struct to pass logging and optional feature handlers to `update`:
+
+```zig
+var writer: pkmn.protocol.Writer = .{ .buffer = &buf };
+var options = pkmn.battle.options(
+    pkmn.protocol.FixedLog{ .writer = &writer },
+    pkmn.gen1.chance.NULL,
+    pkmn.gen1.calc.NULL,
+);
+```
+
+Use `pkmn.protocol.NULL` to disable logging (produces no-ops). Use `pkmn.gen1.NULL` as a shortcut for the null options struct if you don't need any optional features:
+
+```zig
+var options = pkmn.gen1.NULL;
+```
+
+## The battle loop
+
+<Steps>
+  <Step title="Initialize choices and pass to start">
+    Both players must pass at the start of the battle to send out their lead Pokémon.
+
+    ```zig
+    var c1: pkmn.Choice = .{};
+    var c2: pkmn.Choice = .{};
+    ```
+
+    The zero value of `pkmn.Choice` is the pass choice.
+  </Step>
+  <Step title="Call update() and loop">
+    ```zig
+    var result = try battle.update(c1, c2, &options);
+    while (result.type == .None) : (result = try battle.update(c1, c2, &options)) {
+        const n1 = random.uintLessThan(u8, battle.choices(.P1, result.p1, &choices));
+        c1 = choices[n1];
+        const n2 = random.uintLessThan(u8, battle.choices(.P2, result.p2, &choices));
+        c2 = choices[n2];
+
+        // Reset the log stream so the buffer gets reused next turn
+        writer.reset();
+    }
+    ```
+
+    `battle.update()` is fallible (`!Result`) — it can fail if logging is enabled and the log buffer is too small. Using a `LOGS_SIZE`-sized buffer makes this impossible in practice.
+  </Step>
+  <Step title="Handle the terminal result">
+    ```zig
+    const msg = switch (result.type) {
+        .Win => "won by Player A",
+        .Lose => "won by Player B",
+        .Tie => "ended in a tie",
+        .Error => "encountered an error",
+        else => unreachable,
+    };
+
+    var out = std.Io.File.stdout().writer(init.io, &.{});
+    try out.interface.print("Battle {s} after {d} turns\n", .{ msg, battle.turn });
+    ```
+  </Step>
+</Steps>
+
+## Protocol logging with `FixedLog`
+
+`pkmn.protocol.FixedLog` is an optimized log handler backed by a fixed buffer. It is more efficient than wrapping a `std.Io.Writer`:
+
+```zig
+var buf: [pkmn.LOGS_SIZE]u8 = undefined;
+var writer: pkmn.protocol.Writer = .{ .buffer = &buf };
+var options = pkmn.battle.options(
+    pkmn.protocol.FixedLog{ .writer = &writer },
+    pkmn.gen1.chance.NULL,
+    pkmn.gen1.calc.NULL,
+);
+```
+
+After each `update`, the log data is in `buf[0..writer.bytes_written]`. Call `writer.reset()` before the next update to reuse the buffer.
+
+You can also use `pkmn.protocol.Log(std.Io.Writer)` to write logs to any standard writer — for example, to print directly to stdout or to an `ArrayList`.
+
+## Complete example
+
+The following is the complete [`examples/zig/example.zig`](https://github.com/pkmn/engine/blob/master/examples/zig/example.zig):
+
+```zig
+const std = @import("std");
+const pkmn = @import("pkmn");
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
+
+    var err = std.Io.File.stderr().writer(init.io, &.{});
+    if (args.len != 2) {
+        try err.interface.print("Usage: {s} <seed>\n", .{args[0]});
+        std.process.exit(1);
+    }
+
+    const seed = std.fmt.parseUnsigned(u64, args[1], 10) catch {
+        try err.interface.print("Invalid seed: {s}\n", .{args[1]});
+        try err.interface.print("Usage: {s} <seed>\n", .{args[0]});
+        std.process.exit(1);
+    };
+
+    var prng: std.Random.DefaultPrng = .init(seed);
+    var random = prng.random();
+    var choices: [pkmn.CHOICES_SIZE]pkmn.Choice = undefined;
+
+    var battle = pkmn.gen1.helpers.Battle.init(
+        random.int(u64),
+        &.{
+            .{ .species = .Bulbasaur, .moves = &.{ .SleepPowder, .SwordsDance, .RazorLeaf, .BodySlam } },
+            .{ .species = .Charmander, .moves = &.{ .FireBlast, .FireSpin, .Slash, .Counter } },
+            .{ .species = .Squirtle, .moves = &.{ .Surf, .Blizzard, .BodySlam, .Rest } },
+            .{ .species = .Pikachu, .moves = &.{ .Thunderbolt, .ThunderWave, .Surf, .SeismicToss } },
+            .{ .species = .Rattata, .moves = &.{ .SuperFang, .BodySlam, .Blizzard, .Thunderbolt } },
+            .{ .species = .Pidgey, .moves = &.{ .DoubleEdge, .QuickAttack, .WingAttack, .MirrorMove } },
+        },
+        &.{
+            .{ .species = .Tauros, .moves = &.{ .BodySlam, .HyperBeam, .Blizzard, .Earthquake } },
+            .{ .species = .Chansey, .moves = &.{ .Reflect, .SeismicToss, .SoftBoiled, .ThunderWave } },
+            .{ .species = .Snorlax, .moves = &.{ .BodySlam, .Reflect, .Rest, .IceBeam } },
+            .{ .species = .Exeggutor, .moves = &.{ .SleepPowder, .Psychic, .Explosion, .DoubleEdge } },
+            .{ .species = .Starmie, .moves = &.{ .Recover, .ThunderWave, .Blizzard, .Thunderbolt } },
+            .{ .species = .Alakazam, .moves = &.{ .Psychic, .SeismicToss, .ThunderWave, .Recover } },
+        },
+    );
+
+    var buf: [pkmn.LOGS_SIZE]u8 = undefined;
+    var writer: pkmn.protocol.Writer = .{ .buffer = &buf };
+    var options = pkmn.battle.options(
+        pkmn.protocol.FixedLog{ .writer = &writer },
+        pkmn.gen1.chance.NULL,
+        pkmn.gen1.calc.NULL,
+    );
+
+    var c1: pkmn.Choice = .{};
+    var c2: pkmn.Choice = .{};
+
+    var result = try battle.update(c1, c2, &options);
+    while (result.type == .None) : (result = try battle.update(c1, c2, &options)) {
+        const n1 = random.uintLessThan(u8, battle.choices(.P1, result.p1, &choices));
+        c1 = choices[n1];
+        const n2 = random.uintLessThan(u8, battle.choices(.P2, result.p2, &choices));
+        c2 = choices[n2];
+        writer.reset();
+    }
+
+    const msg = switch (result.type) {
+        .Win => "won by Player A",
+        .Lose => "won by Player B",
+        .Tie => "ended in a tie",
+        .Error => "encountered an error",
+        else => unreachable,
+    };
+
+    var out = std.Io.File.stdout().writer(init.io, &.{});
+    try out.interface.print("Battle {s} after {d} turns\n", .{ msg, battle.turn });
+}
+```
+
+Run it with:
+
+```bash
+zig build run -- 12345
+```
+
+## Advanced features
+
+### `FixedRNG`
+
+`FixedRNG` lets you fully specify the RNG frames for a battle, ensuring deterministic outcomes. This is useful for testing specific scenarios:
+
+```zig
+// FixedRNG changes the size of the Battle object compared to PRNG
+// Refer to the Zig source for the exact API
+```
+
+<Note>
+  Using `FixedRNG` changes the size of the `Battle` type. Battles initialized with `FixedRNG` are not interchangeable with battles using the standard `PRNG`.
+</Note>
+
+### `pkmn.gen1.Chance`
+
+When built with `-Dchance`, the engine tracks the probability of every RNG outcome during an update. Pass a `Chance` instance in the options struct to collect this data:
+
+```zig
+var options = pkmn.battle.options(
+    pkmn.protocol.NULL,
+    pkmn.gen1.Chance{ ... }, // tracks probability
+    pkmn.gen1.calc.NULL,
+);
+```
+
+After the update, inspect `options.chance` for the accumulated probability and the `Actions` that were observed.
+
+### `pkmn.gen1.Calc`
+
+When built with `-Dcalc`, the engine exposes damage calculation summaries and allows you to override RNG values to force specific damage rolls. Pass a `Calc` instance in the options struct:
+
+```zig
+var options = pkmn.battle.options(
+    pkmn.protocol.NULL,
+    pkmn.gen1.chance.NULL,
+    pkmn.gen1.Calc{ ... }, // force specific outcomes / read summaries
+);
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="TypeScript guide" icon="code" href="/guides/typescript">
+    Use the engine from TypeScript or JavaScript
+  </Card>
+  <Card title="C guide" icon="c" href="/guides/c">
+    Use the C API to build bindings in other languages
+  </Card>
+  <Card title="Build options" icon="settings" href="/concepts/build-options">
+    Detailed reference for all build flags
+  </Card>
+  <Card title="Protocol" icon="database" href="/concepts/protocol">
+    Understand the binary protocol log format
+  </Card>
+</CardGroup>

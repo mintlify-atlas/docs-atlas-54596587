@@ -1,0 +1,208 @@
+---
+title: "Binary protocol"
+description: "The pkmn engine's binary wire protocol: a stripped-down, native-endian translation of Pokémon Showdown's SIM-PROTOCOL, available when built with -Dlog."
+---
+
+The pkmn engine communicates battle progress through two mechanisms. The `Result` type — returned by every `update()` call — communicates whether the battle has ended and what kinds of choices each player can make next. This is always available and has no overhead.
+
+More detailed information about what happened during a turn is available only when the engine is built with `-Dlog`. When enabled, each `update()` writes a compact binary message stream to a `Log` writer provided by the caller.
+
+<Note>
+  The protocol is only generated when the engine is compiled with `-Dlog`. Binary releases of `libpkmn` and `libpkmn-showdown` ship with `-Dlog` enabled by default.
+</Note>
+
+## What the protocol is
+
+The protocol is a **binary translation of [Pokémon Showdown's SIM-PROTOCOL](https://github.com/smogon/pokemon-showdown/blob/master/sim/SIM-PROTOCOL.md)**, stripped down for efficiency:
+
+- Redundant messages such as `|upkeep|` and `|` are omitted
+- There is no `|split|` message — the engine always provides the "omniscient" stream; other views must be reconstructed by driver code
+- There is no `|request|` message — callers inspect the raw `Battle` state and the `Result` directly
+- All integers are written in **native endianness** (the byte order of the host system)
+
+The protocol may vary slightly between generations. For example, encoding a `Move` requires more than one byte after Generation II. Differences are documented where they apply.
+
+## The `update` / `choices` cycle
+
+At the start of a battle, both players must pass as their first choice to switch in the lead Pokémon. After that, the core loop is:
+
+1. Call `update(c1, c2)` with both players' choices — returns a `Result`
+2. If `result.type` is not `None`, the battle is over
+3. Call `choices(player, result)` to get the valid choices for each player
+4. Pick a choice for each player and go back to step 1
+
+If `-Dlog` is enabled, step 1 also fills the log buffer with messages describing everything that happened that turn. The buffer should be reset between calls.
+
+## Buffer sizing
+
+Two constants are provided to help allocate correctly-sized buffers:
+
+| Constant | Description |
+|---|---|
+| `pkmn.CHOICES_SIZE` | Optimal buffer size for storing all valid choice options from `choices()`. At least as large as `pkmn.MAX_CHOICES`. |
+| `pkmn.LOGS_SIZE` | Optimal buffer size for storing one turn's worth of protocol log output. At least as large as `pkmn.MAX_LOGS`. |
+
+Per-generation constants are also available — for example, `pkmn.gen1.LOGS_SIZE` and `pkmn.gen1.CHOICES_SIZE`. The top-level constants are defined as the maximum across all supported generations.
+
+For Generation I, `MAX_LOGS` is **180 bytes**. The worst case requires two burned Aerodactyl with Leech Seed, Confuse Ray, and Metronome arranged to produce maximum simultaneous multi-hit damage, leech seed healing, and confusion activations in a single turn.
+
+The log `Writer` can be any Zig `std.io.Writer` — including `ArrayList.Writer` for arbitrary-length output — but for performance a `FixedBufferStream` backed by a statically allocated `LOGS_SIZE` array is recommended.
+
+## Result
+
+Every `update()` returns a `Result` encoding three things: the overall battle outcome, and a choice type for each player.
+
+**Battle outcome:**
+
+| Raw | Description |
+|---|---|
+| `0x00` | None — battle continues |
+| `0x01` | Player 1 wins |
+| `0x02` | Player 2 wins |
+| `0x03` | Tie |
+| `0x04` | Error |
+
+Any result other than `None` is terminal — no further updates may be made. `Error` is returned when a desync or glitch occurs. In `-Dshowdown` mode, desyncs are modded away so `Error` cannot be returned from an update. In the C API, `Error` is also returned if the log buffer runs out of space.
+
+The choice type for each player in the result corresponds to the `requestType` concept from Pokémon Showdown. Pass this value to `choices()` to enumerate what the player can do next.
+
+## Choices
+
+The `choices()` function returns an array of valid choices for a player. Each choice is a single byte:
+
+| Raw | Type | Data |
+|---|---|---|
+| `0x00` | `pass` | None — the player has no decision to make |
+| `0x01` | `move` | 1–4: move slot number (1-based) |
+| `0x02` | `switch` | 2–6: party slot number (1-based, cannot be the active Pokémon) |
+
+`pass` occurs when only the other player gets to make a decision — for example, when choosing a replacement after a Pokémon faints or uses Baton Pass.
+
+Move data should be `0` in situations where the cartridge does not present a move selection (e.g. during Wrap or Bide in Generation I). In `-Dshowdown` mode, move data must always be in the range 1–4.
+
+<Warning>
+  Providing a choice not returned by `choices()` is undefined behavior. It may corrupt the battle state or crash the engine.
+</Warning>
+
+## PokemonIdent
+
+Many protocol messages reference a Pokémon using a `PokemonIdent` — a single bit-packed byte:
+
+| Bits | Description |
+|---|---|
+| 7–5 (MSB) | Always `0` |
+| 4 | Position: `0` = slot `a`, `1` = slot `b` (doubles only) |
+| 3 | Player: `0` = Player 1, `1` = Player 2 |
+| 2–0 (LSB) | Party slot (1–6) from the original team order at battle start |
+
+Driver code can translate this to a Pokémon Showdown-compatible `POSITION: NAME` identifier if a mapping from party slots to nicknames is available.
+
+## Protocol messages
+
+With `-Dlog` enabled, messages are written to the log in sequence. The first byte of each message is the `ArgType` — an integer identifying the message type. Subsequent bytes are the payload. Message parsing terminates when a `0x00` byte is encountered in the `ArgType` position.
+
+Game objects (moves, species, types, etc.) are written as their internal integer identifiers. A human-readable [`protocol.json`](https://github.com/pkmn/engine/blob/master/src/data/protocol.json) and [`ids.json`](https://github.com/pkmn/engine/blob/master/src/pkg/data/ids.json) are generated from the library and can be used to decode these values.
+
+### Summary of message types
+
+| ArgType | Message | Description |
+|---|---|---|
+| `0x01` | `LastStill` | Modifier: append `[still]` to the most recent `\|move\|` in the buffer |
+| `0x02` | `LastMiss` | Modifier: append `[miss]` to the most recent `\|move\|` in the buffer |
+| `0x03` | `\|move\|` | A Pokémon used a move |
+| `0x04` | `\|switch\|` | A Pokémon switched in |
+| `0x05` | `\|cant\|` | A Pokémon could not act |
+| `0x06` | `\|faint\|` | A Pokémon fainted |
+| `0x07` | `\|turn\|` | A new turn has begun |
+| `0x08` | `\|win\|` | A player won the battle |
+| `0x09` | `\|tie\|` | The battle ended in a tie |
+| `0x0A` | `\|-damage\|` | A Pokémon took damage |
+| `0x0B` | `\|-heal\|` | A Pokémon healed HP |
+| `0x0C` | `\|-status\|` | A Pokémon was inflicted with a status condition |
+| `0x0D` | `\|-curestatus\|` | A Pokémon recovered from a status condition |
+| `0x0E` | `\|-boost\|` / `\|-unboost\|` | A stat was boosted or lowered |
+| `0x0F` | `\|-clearallboost\|` | All boosts on all Pokémon were cleared |
+| `0x10` | `\|-fail\|` | A move failed |
+| `0x11` | `\|-miss\|` | A move missed |
+| `0x12` | `\|-hitcount\|` | A multi-hit move's hit count |
+| `0x13` | `\|-prepare\|` | A Pokémon is charging a two-turn move |
+| `0x14` | `\|-mustrecharge\|` | A Pokémon must spend the next turn recharging |
+| `0x15` | `\|-activate\|` | A miscellaneous effect activated |
+| `0x16` | `\|-fieldactivate\|` | A field condition activated |
+| `0x17` | `\|-start\|` | A volatile status was inflicted |
+| `0x18` | `\|-end\|` | A volatile status ended |
+| `0x19` | `\|-ohko\|` | A one-hit KO move succeeded |
+| `0x1A` | `\|-crit\|` | A move landed a critical hit |
+| `0x1B` | `\|-supereffective\|` | A move was super effective |
+| `0x1C` | `\|-resisted\|` | A move was not very effective |
+| `0x1D` | `\|-immune\|` | A Pokémon was immune to a move |
+| `0x1E` | `\|-transform\|` | A Pokémon transformed |
+| `0x1F` | `\|drag\|` | A Pokémon was dragged in (Gen II+) |
+| `0x20` | `\|-item\|` | A Pokémon's item was revealed or changed (Gen II+) |
+| `0x21` | `\|-enditem\|` | A Pokémon's held item was lost (Gen II+) |
+| `0x22` | `\|-cureteam\|` | A Pokémon cured its team of status (Gen II+) |
+| `0x23` | `\|-sethp\|` | A Pokémon's HP was set to a specific value (Gen II+) |
+| `0x24` | `\|-setboost\|` | A stat was boosted to a specific level (Gen II+) |
+| `0x25` | `\|-copyboost\|` | A Pokémon copied another's stat boosts (Gen II+) |
+| `0x26` | `\|-sidestart\|` | A side condition began (Gen II+) |
+| `0x27` | `\|-sideend\|` | A side condition ended (Gen II+) |
+| `0x28` | `\|-singlemove\|` | A move effect lasting the duration of the move (Gen II+) |
+| `0x29` | `\|-singleturn\|` | A move effect lasting the current turn (Gen II+) |
+| `0x2A` | `\|-weather\|` | Weather is in effect (Gen II+) |
+
+### `LastStill` and `LastMiss`
+
+Two message types (`0x01` and `0x02`) are modifiers rather than standalone messages. Pokémon Showdown batches messages before writing them, so it can annotate a `|move|` with `[still]` or `[miss]` before emitting. The pkmn engine streams writes immediately and cannot batch.
+
+The contract for parsing: if a `LastStill` (`0x01`) byte appears in the buffer and there is a preceding `|move|` message in the same buffer, append `[still]` to that move message. If a `LastMiss` (`0x02`) byte appears, append `[miss]` to the last seen `|move|` message.
+
+## Debug protocol
+
+The [`pkmn-debug`](https://github.com/pkmn/engine#pkmn-debug) tool decodes binary battle and log data and renders an [HTML debug UI](https://pkmn.cc/debug.html). It expects a specific debug binary format on stdin.
+
+### Header
+
+The debug stream begins with a fixed header:
+
+| Bytes | Description |
+|---|---|
+| 0–1 | `1` if `-Dshowdown` is enabled, `0` otherwise |
+| 1–2 | Generation number (1, 2, …) |
+| 2–4 | Two native-endian signed bytes: $N$, the fixed log buffer size per frame (negative means variable size) |
+| 4–8 | Four native-endian signed bytes: $X$, the fixed extra data buffer size per frame (negative means variable size) |
+| 8–(8+B) | $B$ serialized bytes of the initial battle state |
+
+### Frames
+
+After the header, zero or more frames follow. The last frame may be partial:
+
+| Bytes | Description |
+|---|---|
+| 0–N | $N$ bytes of log message protocol, terminated by `0x00` or EOF if $N < 0$ |
+| N–(N+X) | $X$ bytes of optional extra data |
+| (N+X+1)–(N+X+B+1) | $B$ bytes of the updated battle state |
+| (N+X+B+2)–(N+X+B+3) | The `Result` of the update |
+| (N+X+B+3)–(N+X+B+4) | The next valid choice for Player 1 |
+| (N+X+B+4)–(N+X+B+5) | The next valid choice for Player 2 |
+
+By convention, debug logs begin after the first `update()` call (the initial switch-in turn). The initial battle state with no active Pokémon, the initial pass choices, and their result are not logged.
+
+## Converting to Pokémon Showdown format
+
+Driver code (such as the `@pkmn/engine` TypeScript package) converts the binary protocol into human-readable Pokémon Showdown simulator format. The `Log.parse` method in the TypeScript driver handles this conversion, provided the caller supplies a mapping from party slot numbers to Pokémon nicknames and species names.
+
+```ts
+import {Log} from '@pkmn/engine';
+
+// Convert binary log buffer to PS-formatted lines
+const lines = Log.parse(buffer, {p1: team1, p2: team2});
+```
+
+<CardGroup cols={2}>
+  <Card title="Design philosophy" icon="compass" href="/concepts/design">
+    Why the protocol is binary and opt-in
+  </Card>
+  <Card title="Build options" icon="sliders" href="/concepts/build-options">
+    Enable `-Dlog` and other compile-time flags
+  </Card>
+</CardGroup>

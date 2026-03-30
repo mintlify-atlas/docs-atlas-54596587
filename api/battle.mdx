@@ -1,0 +1,578 @@
+---
+title: "Battle"
+description: "Factory and interface for creating and interacting with Pokémon battle simulations."
+---
+
+The `Battle` factory creates and restores battle objects. Every battle object implements the `API` interface, which provides the core methods for advancing and inspecting a battle.
+
+## `initialize`
+
+Before creating any battles on platforms that require WebAssembly (e.g. the browser), call `initialize` to load the native engine bindings.
+
+```ts
+import { initialize } from '@pkmn/engine';
+
+await initialize(/* showdown */ true);
+```
+
+On Node.js, the native addon is loaded synchronously on first use and `initialize` is optional. In the browser, `initialize` **must** be called before any `Battle` methods.
+
+<ParamField path="showdown" type="boolean" required>
+  Whether to load the Pokémon Showdown–compatible addon (`true`) or the
+  cartridge-accurate addon (`false`). Must match the `showdown` option passed
+  to `Battle.create` / `Battle.restore`.
+</ParamField>
+
+<ParamField path="addon" type="string | URL | WebAssembly.Module | WebAssembly.Instance | Promise<Response>">
+  Optional path or module to the WASM binary. When omitted the engine resolves
+  the bundled binary automatically.
+</ParamField>
+
+---
+
+## `Battle` factory
+
+`Battle` is a factory object (not a class) with two static-style methods.
+
+### `Battle.create`
+
+Create a new battle from scratch.
+
+```ts
+import { Battle } from '@pkmn/engine';
+
+const battle = Battle.create(gen, {
+  seed: [1, 2, 3, 4],
+  showdown: true,
+  log: true,
+  p1: { name: 'Alice', team: p1Team },
+  p2: { name: 'Bob',   team: p2Team },
+});
+```
+
+**Signature**
+
+```ts
+Battle.create(gen: Generation, options: CreateOptions): Battle
+```
+
+<ParamField path="gen" type="Generation" required>
+  A `@pkmn/data` `Generation` object that identifies which generation of rules
+  to use. Currently only Generation I (`gen.num === 1`) is supported.
+</ParamField>
+
+<ParamField path="options" type="CreateOptions" required>
+  Options for the new battle. See [`CreateOptions`](#createoptions) below.
+</ParamField>
+
+<ResponseField name="returns" type="Battle">
+  A fully-initialized `Battle` object ready for `update` calls.
+</ResponseField>
+
+---
+
+### `Battle.restore`
+
+Restore an in-progress battle from previously serialized data (e.g. the output
+of `battle.toJSON()`).
+
+```ts
+const snapshot = battle.toJSON();
+// ...later...
+const restored = Battle.restore(gen, snapshot, {
+  showdown: true,
+  log: true,
+  p1: { name: 'Alice', team: p1Team },
+  p2: { name: 'Bob',   team: p2Team },
+});
+```
+
+**Signature**
+
+```ts
+Battle.restore(gen: Generation, battle: Data<Battle>, options: RestoreOptions): Battle
+```
+
+<ParamField path="gen" type="Generation" required>
+  The same generation that was used to create the original battle.
+</ParamField>
+
+<ParamField path="battle" type="Data<Battle>" required>
+  Serialized battle state, as returned by `battle.toJSON()`. See
+  [`Data<T>`](#data-t) below.
+</ParamField>
+
+<ParamField path="options" type="RestoreOptions" required>
+  Options for the restored battle. See [`RestoreOptions`](#restoreoptions)
+  below.
+</ParamField>
+
+<ResponseField name="returns" type="Battle">
+  A `Battle` object initialized from the provided snapshot.
+</ResponseField>
+
+---
+
+## Types
+
+### `CreateOptions`
+
+Options passed to `Battle.create`. The `log` field determines which variant of
+the type applies.
+
+```ts
+type CreateOptions = {
+  seed: number[];
+  showdown?: boolean;
+  inert?: true;
+} & (
+  | { log: true;    p1: PlayerOptions;              p2: PlayerOptions }
+  | { log?: false;  p1: Omit<PlayerOptions, 'name'>; p2: Omit<PlayerOptions, 'name'> }
+);
+```
+
+<ParamField path="seed" type="number[]" required>
+  RNG seed for the battle. The required format depends on the generation and
+  mode:
+
+  - **Showdown mode** (`showdown: true`): a 4-tuple of 16-bit unsigned integers,
+    e.g. `[1, 2, 3, 4]`.
+  - **Cartridge mode** (`showdown: false`): a 10-tuple of bytes, e.g.
+    `[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]`.
+</ParamField>
+
+<ParamField path="showdown" type="boolean">
+  Enable Pokémon Showdown compatibility mode. Defaults to `false`. Requires
+  the engine to have been built with `-Dshowdown`.
+</ParamField>
+
+<ParamField path="inert" type="true">
+  Initialize the battle object without native code functionality (no `update`,
+  `choices`, or log support). Useful for inspecting serialized state without
+  a loaded addon.
+</ParamField>
+
+<ParamField path="log" type="boolean">
+  When `true`, `battle.log` is populated after each `update` call with the
+  binary protocol log for that turn. Requires the engine to have been built
+  with `-Dlog`. When `log: true`, both `p1` and `p2` must include a `name`.
+</ParamField>
+
+<ParamField path="p1" type="PlayerOptions | Omit<PlayerOptions, 'name'>" required>
+  Options for Player 1. When `log: true` the full `PlayerOptions` (including
+  `name`) is required; otherwise `name` may be omitted.
+
+  <Expandable title="PlayerOptions fields">
+    <ParamField path="name" type="string">
+      The player's display name. Required when `log: true`.
+    </ParamField>
+    <ParamField path="team" type="Partial<PokemonSet>[]" required>
+      The player's team as an array of (possibly partial) `@pkmn/data`
+      `PokemonSet` objects.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="p2" type="PlayerOptions | Omit<PlayerOptions, 'name'>" required>
+  Options for Player 2. Same shape as `p1`.
+</ParamField>
+
+---
+
+### `RestoreOptions`
+
+Options passed to `Battle.restore`.
+
+```ts
+type RestoreOptions =
+  | { showdown?: boolean; log: true;   p1: PlayerOptions; p2: PlayerOptions }
+  | { showdown?: boolean; log?: false };
+```
+
+<ParamField path="showdown" type="boolean">
+  Must match the `showdown` mode of the original battle.
+</ParamField>
+
+<ParamField path="log" type="boolean">
+  Re-enable protocol logging on the restored battle. When `true`, `p1` and
+  `p2` with full `PlayerOptions` must be provided.
+</ParamField>
+
+<ParamField path="p1" type="PlayerOptions">
+  Required when `log: true`. See [`PlayerOptions`](#createoptions).
+</ParamField>
+
+<ParamField path="p2" type="PlayerOptions">
+  Required when `log: true`. See [`PlayerOptions`](#createoptions).
+</ParamField>
+
+---
+
+### `PlayerOptions`
+
+```ts
+interface PlayerOptions {
+  name: string;
+  team: Partial<PokemonSet>[];
+}
+```
+
+<ResponseField name="name" type="string">
+  The player's display name. Used in protocol log output.
+</ResponseField>
+
+<ResponseField name="team" type="Partial<PokemonSet>[]">
+  The player's team. Each entry is a (possibly partial) `@pkmn/data`
+  `PokemonSet`.
+</ResponseField>
+
+---
+
+### `Data<T>`
+
+```ts
+type Data<T> =
+  T extends readonly any[] ? { [K in keyof T]: Data<T[K]> }
+  : T extends Iterable<infer U> ? (U extends object ? Iterable<Data<U>> : T)
+  : T extends object ? { [K in keyof T as T[K] extends Function ? never : K]: Data<T[K]> }
+  : T;
+```
+
+A utility type that strips all function-typed properties from `T`, leaving only
+plain data fields. Used as the return type of `battle.toJSON()` and as the
+input type of `Battle.restore`.
+
+---
+
+## `API` interface
+
+All battle objects — regardless of generation — implement `API`.
+
+```ts
+interface API {
+  log?: DataView;
+  bytes(): DataView;
+  update(c1: Choice, c2: Choice): Result;
+  choices(player: Player, result: Result): Choice[];
+  toJSON(): Data<Battle>;
+}
+```
+
+<ResponseField name="log" type="DataView | undefined">
+  The binary protocol log produced by the most recent `update` call, or
+  `undefined` if logging was not enabled in `CreateOptions`. Pass this to
+  `Log.parse` to decode individual messages.
+</ResponseField>
+
+<ResponseField name="bytes()" type="DataView">
+  Returns the raw serialized bytes of the entire battle state.
+</ResponseField>
+
+<ResponseField name="update(c1, c2)" type="Result">
+  Advance the battle by applying Player 1's choice `c1` and Player 2's choice
+  `c2`. Returns a [`Result`](/api/choices-result#result) describing the outcome
+  and what each player must choose next.
+
+  Always obtain choices from `battle.choices()` — passing an invalid choice
+  produces undefined behavior.
+</ResponseField>
+
+<ResponseField name="choices(player, result)" type="Choice[]">
+  Returns all valid choices for `player` given the most recent `result`.
+
+  <Note>
+    In Generation I without Showdown compatibility mode, this may return an
+    empty array when the Transform + Mirror Move/Metronome PP error interacts
+    with Disable, causing a cartridge soft-lock. This cannot happen with
+    `showdown: true`.
+  </Note>
+</ResponseField>
+
+<ResponseField name="toJSON()" type="Data<Battle>">
+  Serialize the battle state to a plain JavaScript object. The result can be
+  passed to `Battle.restore` to recreate the battle later.
+</ResponseField>
+
+---
+
+## `Gen1.Battle` interface
+
+Generation I battles implement `API` and add Gen I–specific state accessors.
+
+```ts
+interface Gen1.Battle extends API {
+  sides: Iterable<Side>;
+  side(player: Player): Side;
+  foe(player: Player): Side;
+  turn: number;
+  lastDamage: number;
+  prng: readonly number[];
+}
+```
+
+<ResponseField name="sides" type="Iterable<Side>">
+  Both sides of the battle, yielded as `[p1Side, p2Side]`.
+</ResponseField>
+
+<ResponseField name="side(player)" type="Side">
+  Returns the [`Side`](#gen1-side) for the given player.
+</ResponseField>
+
+<ResponseField name="foe(player)" type="Side">
+  Returns the opposing [`Side`](#gen1-side) for the given player.
+</ResponseField>
+
+<ResponseField name="turn" type="number">
+  The current turn number (0 before the battle has started).
+</ResponseField>
+
+<ResponseField name="lastDamage" type="number">
+  The last damage dealt by either side.
+</ResponseField>
+
+<ResponseField name="prng" type="readonly number[]">
+  The current RNG state.
+
+  - **Showdown mode**: 4-tuple of 16-bit big-endian values.
+  - **Cartridge mode**: 10-tuple of bytes.
+</ResponseField>
+
+---
+
+## `Gen1.Side` interface
+
+```ts
+interface Gen1.Side {
+  active: Pokemon | undefined;
+  pokemon: Iterable<Pokemon>;
+  slot(id: number): Slot | undefined;
+  get(slot: Slot): Pokemon | undefined;
+  lastUsedMove: ID | undefined;
+  lastSelectedMove: ID | undefined;
+  lastMoveIndex: 1 | 2 | 3 | 4 | undefined;
+  lastMoveCounterable: boolean;
+}
+```
+
+<ResponseField name="active" type="Pokemon | undefined">
+  The currently active Pokémon, or `undefined` before the battle has started.
+  A fainted Pokémon remains "active" until its replacement switches in.
+</ResponseField>
+
+<ResponseField name="pokemon" type="Iterable<Pokemon>">
+  The player's party in current order (accounting for switches).
+</ResponseField>
+
+<ResponseField name="slot(id)" type="Slot | undefined">
+  Returns the current slot of the Pokémon that started the battle at index
+  `id`, or `undefined` if the index is invalid.
+</ResponseField>
+
+<ResponseField name="get(slot)" type="Pokemon | undefined">
+  Returns the Pokémon at the given `slot`, or `undefined` if the slot is empty.
+</ResponseField>
+
+<ResponseField name="lastUsedMove" type="ID | undefined">
+  The last move the player executed.
+</ResponseField>
+
+<ResponseField name="lastSelectedMove" type="ID | undefined">
+  The last move the player selected in the battle menu.
+</ResponseField>
+
+<ResponseField name="lastMoveIndex" type="1 | 2 | 3 | 4 | undefined">
+  The move slot index of the last move selected in the battle menu.
+</ResponseField>
+
+<ResponseField name="lastMoveCounterable" type="boolean">
+  Whether the last move executed by this player was counterable.
+</ResponseField>
+
+---
+
+## `Gen1.Pokemon` interface
+
+<ResponseField name="species" type="ID">
+  The Pokémon's current species (may differ from its stored species after
+  Transform).
+</ResponseField>
+
+<ResponseField name="types" type="readonly [TypeName, TypeName]">
+  The Pokémon's current typing (may differ after Conversion / Transform).
+</ResponseField>
+
+<ResponseField name="level" type="number">
+  The Pokémon's level.
+</ResponseField>
+
+<ResponseField name="hp" type="number">
+  The Pokémon's current HP.
+</ResponseField>
+
+<ResponseField name="status" type="StatusName | undefined">
+  The Pokémon's current status condition, or `undefined` if none.
+</ResponseField>
+
+<ResponseField name="statusData" type="object">
+  Additional data about the current status condition.
+
+  <Expandable title="statusData fields">
+    <ResponseField name="sleep" type="number">
+      If status is `slp`, the number of sleep turns remaining.
+    </ResponseField>
+    <ResponseField name="self" type="boolean">
+      If status is `slp`, whether the sleep was self-inflicted (Rest).
+    </ResponseField>
+    <ResponseField name="toxic" type="number">
+      The Toxic counter (used for escalating Toxic damage).
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="stats" type="StatsTable">
+  The Pokémon's current stats after accounting for boosts, status, and other
+  modifications.
+</ResponseField>
+
+<ResponseField name="stat(stat)" type="number">
+  Returns the current value of a single stat. Accepts `StatID` or `'spc'`.
+</ResponseField>
+
+<ResponseField name="boosts" type="BoostsTable">
+  The Pokémon's current stat boosts.
+</ResponseField>
+
+<ResponseField name="boost(boost)" type="number">
+  Returns the current value of a single boost stage. Accepts `BoostID`.
+</ResponseField>
+
+<ResponseField name="moves" type="Iterable<MoveSlot>">
+  The Pokémon's current move slots (may differ from stored moves after Mimic /
+  Transform).
+</ResponseField>
+
+<ResponseField name="move(slot)" type="MoveSlot | undefined">
+  Returns the move at the given slot (1–4), or `undefined` if absent.
+</ResponseField>
+
+<ResponseField name="volatiles" type="Gen1.Volatiles">
+  The Pokémon's active volatile statuses. See
+  [`Gen1.Volatiles`](#gen1-volatiles).
+</ResponseField>
+
+<ResponseField name="stored" type="object">
+  The Pokémon's original (pre-Transform) data.
+
+  <Expandable title="stored fields">
+    <ResponseField name="species" type="ID">Original species.</ResponseField>
+    <ResponseField name="types" type="readonly [TypeName, TypeName]">Original typing.</ResponseField>
+    <ResponseField name="stats" type="StatsTable">Original unmodified stats.</ResponseField>
+    <ResponseField name="stat(stat)" type="number">Original stat value.</ResponseField>
+    <ResponseField name="moves" type="Iterable<Omit<MoveSlot, 'disabled'>>">Original move slots.</ResponseField>
+    <ResponseField name="move(slot)" type="Omit<MoveSlot, 'disabled'> | undefined">Original move at slot 1–4.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="position" type="Slot">
+  The current one-indexed position of this Pokémon in the party.
+</ResponseField>
+
+---
+
+## `Gen1.MoveSlot` interface
+
+```ts
+interface Gen1.MoveSlot {
+  id: ID;
+  pp: number;
+  disabled?: number;
+}
+```
+
+<ResponseField name="id" type="ID">
+  The move identifier.
+</ResponseField>
+
+<ResponseField name="pp" type="number">
+  The remaining PP for this move slot.
+</ResponseField>
+
+<ResponseField name="disabled" type="number | undefined">
+  If present, the number of turns this move slot remains disabled by the
+  Disable move.
+</ResponseField>
+
+---
+
+## `Gen1.Volatiles` interface
+
+Volatile statuses are present only while active; their absence means the status
+is not in effect.
+
+<ResponseField name="bide" type="{ duration: number; damage: number } | undefined">
+  Bide is charging. `duration` is turns remaining; `damage` is accumulated
+  damage.
+</ResponseField>
+
+<ResponseField name="thrashing" type="{ duration: number; accuracy: number } | undefined">
+  A thrashing move (Thrash, Petal Dance) is in progress. `accuracy` is the
+  overwritten accuracy (0 if not overwritten).
+</ResponseField>
+
+<ResponseField name="flinch" type="unknown | undefined">
+  The Pokémon will flinch this turn.
+</ResponseField>
+
+<ResponseField name="charging" type="unknown | undefined">
+  A two-turn charging move (Fly, Dig, Solar Beam, etc.) is in its charge turn.
+</ResponseField>
+
+<ResponseField name="binding" type="{ duration: number } | undefined">
+  A binding move (Wrap, Clamp, etc.) is in progress. `duration` is attacks
+  remaining.
+</ResponseField>
+
+<ResponseField name="invulnerable" type="unknown | undefined">
+  The Pokémon is invulnerable (in the semi-invulnerable turn of Fly/Dig).
+</ResponseField>
+
+<ResponseField name="confusion" type="{ duration: number } | undefined">
+  The Pokémon is confused. `duration` is turns remaining.
+</ResponseField>
+
+<ResponseField name="mist" type="unknown | undefined">
+  Mist is protecting the Pokémon's stats.
+</ResponseField>
+
+<ResponseField name="focusenergy" type="unknown | undefined">
+  Focus Energy has been used (critical-hit rate modifier active).
+</ResponseField>
+
+<ResponseField name="substitute" type="{ hp: number } | undefined">
+  A substitute is active. `hp` is the substitute's remaining HP.
+</ResponseField>
+
+<ResponseField name="recharging" type="unknown | undefined">
+  The Pokémon must recharge (after Hyper Beam, etc.).
+</ResponseField>
+
+<ResponseField name="rage" type="{ accuracy: number } | undefined">
+  Rage is active. `accuracy` is the overwritten accuracy (0 if not
+  overwritten).
+</ResponseField>
+
+<ResponseField name="leechseed" type="unknown | undefined">
+  The Pokémon has been Leech Seeded.
+</ResponseField>
+
+<ResponseField name="lightscreen" type="unknown | undefined">
+  Light Screen is active on this Pokémon's side.
+</ResponseField>
+
+<ResponseField name="reflect" type="unknown | undefined">
+  Reflect is active on this Pokémon's side.
+</ResponseField>
+
+<ResponseField name="transform" type="{ player: 'p1' | 'p2'; slot: number } | undefined">
+  The Pokémon has Transformed. `player` and `slot` identify the target Pokémon.
+</ResponseField>

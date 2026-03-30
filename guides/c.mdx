@@ -1,0 +1,321 @@
+---
+title: "C"
+description: "Guide to the libpkmn C API, covering the pkmn.h header, the battle update loop, choice handling, linking, and known community bindings."
+---
+
+## Overview
+
+`libpkmn` exposes a C API via the `<pkmn.h>` header. All symbols are prefixed with `pkmn_` to avoid name collisions. The C API is intentionally minimal — it provides the core battle update loop and choice enumeration, but does not expose helpers for creating or populating battle objects.
+
+<Note>
+  The C API is designed as a **foundation for higher-level bindings** in other languages. The lack of namespaces in C, and the implementation-defined layout of C bit fields, are the main reasons the API stays sparse. If you want ergonomic battle initialization, write a thin wrapper on top using the binary data format documented in [`src/lib/gen1/README.md`](https://github.com/pkmn/engine/blob/master/src/lib/gen1/README.md).
+</Note>
+
+## Installation
+
+Download pre-built binaries from the [releases](https://github.com/pkmn/engine/releases) page, or build from source:
+
+```bash
+zig build --prefix /usr/local -Doptimize=ReleaseFast
+```
+
+This produces `libpkmn` (cartridge-accurate mode). To build the Pokémon Showdown compatible variant:
+
+```bash
+zig build --prefix /usr/local -Doptimize=ReleaseFast -Dshowdown
+```
+
+The binary releases include both `libpkmn` and `libpkmn-showdown`, both compiled with `-Dlog` enabled.
+
+## Including the header
+
+```c
+#include <pkmn.h>
+```
+
+Place the header somewhere on your include path. The binary distributions install it to `$PREFIX/include/pkmn.h`.
+
+## Key types
+
+### `pkmn_result`
+
+The return value of `pkmn_gen1_battle_update`. Use the following functions to inspect it:
+
+```c
+pkmn_result_kind pkmn_result_type(pkmn_result result);
+pkmn_choice_kind pkmn_result_p1(pkmn_result result);
+pkmn_choice_kind pkmn_result_p2(pkmn_result result);
+bool             pkmn_error(pkmn_result result);
+```
+
+Result kinds:
+
+| Constant | Meaning |
+|---|---|
+| `PKMN_RESULT_NONE` (0) | Battle is ongoing; both players need to make choices |
+| `PKMN_RESULT_WIN` | Player 1 wins |
+| `PKMN_RESULT_LOSE` | Player 2 wins |
+| `PKMN_RESULT_TIE` | Battle ended in a tie |
+| `PKMN_RESULT_ERROR` | Engine error (only possible in cartridge mode with `-Dlog`) |
+
+`pkmn_result_p1` and `pkmn_result_p2` return a `pkmn_choice_kind` indicating what type of choice each player must make next (`PKMN_CHOICE_PASS`, `PKMN_CHOICE_MOVE`, or `PKMN_CHOICE_SWITCH`).
+
+### `pkmn_choice`
+
+`pkmn_choice` is a `uint8_t`. The pass choice is guaranteed to be `0`:
+
+```c
+pkmn_choice c1 = 0, c2 = 0; // pass choices
+```
+
+To construct a choice explicitly:
+
+```c
+// pkmn_choice_init(type, data)
+// data: 0 for pass, 1-4 for move, 2-6 for switch
+pkmn_choice move1 = pkmn_choice_init(PKMN_CHOICE_MOVE, 1);
+pkmn_choice switch2 = pkmn_choice_init(PKMN_CHOICE_SWITCH, 2);
+```
+
+### Size constants
+
+| Constant | Description |
+|---|---|
+| `PKMN_CHOICES_SIZE` | Optimal buffer size for choice enumeration |
+| `PKMN_MAX_CHOICES` | Minimum buffer size for choice enumeration |
+| `PKMN_LOGS_SIZE` | Optimal buffer size for protocol logs |
+| `PKMN_MAX_LOGS` | Maximum bytes logged by a single update |
+| `PKMN_GEN1_BATTLE_SIZE` (384) | Size of `pkmn_gen1_battle` in bytes |
+
+## The battle loop
+
+<Steps>
+  <Step title="Initialize the battle">
+    `libpkmn` does not provide helpers for populating `pkmn_gen1_battle`. The struct is an opaque fixed-size byte array (`PKMN_GEN1_BATTLE_SIZE` = 384 bytes). You must either fill it in manually based on the [data layout documentation](https://github.com/pkmn/engine/blob/master/src/lib/gen1/README.md) or borrow a pre-initialized state (as the C example does).
+
+    ```c
+    pkmn_gen1_battle battle = { { /* 384 bytes of initialized battle data */ } };
+    ```
+  </Step>
+  <Step title="Set up battle options">
+    Configure the `pkmn_gen1_battle_options` struct with a log buffer and any optional feature handlers. Pass `NULL` for any features you don't need:
+
+    ```c
+    uint8_t buf[PKMN_LOGS_SIZE];
+    pkmn_gen1_log_options log_options = {.buf = buf, .len = PKMN_LOGS_SIZE};
+
+    pkmn_gen1_battle_options options;
+    pkmn_gen1_battle_options_set(&options, &log_options, NULL, NULL);
+    ```
+
+    If you don't need any optional features, pass `NULL` as the options argument to the update function.
+  </Step>
+  <Step title="Run the update loop">
+    ```c
+    pkmn_result result;
+    pkmn_choice c1 = 0, c2 = 0; // start with pass choices
+
+    while (!pkmn_result_type(result = pkmn_gen1_battle_update(&battle, c1, c2, &options))) {
+        c1 = choose(&battle, &random, PKMN_PLAYER_P1, pkmn_result_p1(result), choices);
+        c2 = choose(&battle, &random, PKMN_PLAYER_P2, pkmn_result_p2(result), choices);
+
+        // Reset options before each update (resets the log stream)
+        pkmn_gen1_battle_options_set(&options, NULL, NULL, NULL);
+    }
+    if (pkmn_error(result)) exit(1);
+    ```
+
+    The loop condition relies on `PKMN_RESULT_NONE` being `0`, which is guaranteed by the API.
+  </Step>
+  <Step title="Enumerate valid choices">
+    ```c
+    pkmn_choice choices[PKMN_CHOICES_SIZE];
+
+    pkmn_choice choose(
+        pkmn_gen1_battle *battle,
+        pkmn_psrng *random,
+        pkmn_player player,
+        pkmn_choice_kind request,
+        pkmn_choice choices[])
+    {
+        uint8_t n = pkmn_gen1_battle_choices(
+            battle, player, request, choices, PKMN_CHOICES_SIZE);
+        assert(n > 0);
+        return choices[(uint64_t)pkmn_psrng_next(random) * n / 0x100000000];
+    }
+    ```
+
+    <Warning>
+      In cartridge mode (without `-Dshowdown`), `pkmn_gen1_battle_choices` can return `0` due to the Transform + Mirror Move/Metronome PP error interacting with Disable. This causes a soft-lock on the original cartridge.
+    </Warning>
+  </Step>
+</Steps>
+
+## Resetting options between updates
+
+Call `pkmn_gen1_battle_options_set` after each update with `NULL` for log and chance to reset the log stream so it can be reused:
+
+```c
+// After processing the log data in buf:
+pkmn_gen1_battle_options_set(&options, NULL, NULL, NULL);
+```
+
+You only need to provide the initial `pkmn_gen1_log_options` pointer on the first call. Subsequent resets with `NULL` preserve the buffer pointer while resetting the write position.
+
+## Checking for errors
+
+```c
+if (pkmn_error(result)) {
+    // The log buffer was too small (impossible with PKMN_LOGS_SIZE)
+    exit(1);
+}
+```
+
+`pkmn_error` returns `true` only when protocol logging is enabled (`-Dlog`) and the provided buffer was smaller than `PKMN_MAX_LOGS`. Using a `PKMN_LOGS_SIZE`-sized buffer makes this impossible.
+
+<Note>
+  `PKMN_RESULT_ERROR` is a different concept — it indicates a battle desync detected by the engine itself and can only occur in cartridge mode (never in Pokémon Showdown compatibility mode).
+</Note>
+
+## The PSRNG helper
+
+`libpkmn` exposes Pokémon Showdown's PRNG for convenience:
+
+```c
+pkmn_psrng random;
+pkmn_psrng_init(&random, seed);
+
+uint32_t value = pkmn_psrng_next(&random);
+```
+
+## Complete example
+
+The following is the complete [`examples/c/example.c`](https://github.com/pkmn/engine/blob/master/examples/c/example.c):
+
+```c
+#include <assert.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <pkmn.h>
+
+pkmn_choice choose(
+   pkmn_gen1_battle *battle,
+   pkmn_psrng *random,
+   pkmn_player player,
+   pkmn_choice_kind request,
+   pkmn_choice choices[])
+{
+   uint8_t n = pkmn_gen1_battle_choices(battle, player, request, choices, PKMN_CHOICES_SIZE);
+   assert(n > 0);
+   return choices[(uint64_t)pkmn_psrng_next(random) * n / 0x100000000];
+}
+
+int main(int argc, char **argv)
+{
+   if (argc != 2) {
+      fprintf(stderr, "Usage: %s <seed>\n", argv[0]);
+      return 1;
+   }
+
+   char *end = NULL;
+   uint64_t seed = strtoul(argv[1], &end, 10);
+   if (errno) {
+      fprintf(stderr, "Invalid seed: %s\n", argv[1]);
+      fprintf(stderr, "Usage: %s <seed>\n", argv[0]);
+      return 1;
+   }
+
+   pkmn_psrng random;
+   pkmn_psrng_init(&random, seed);
+   pkmn_choice choices[PKMN_CHOICES_SIZE];
+
+   // Battle state initialized from serialized Zig example data
+   pkmn_gen1_battle battle = { {
+      0x25, 0x01, 0xc4, 0x00, 0xc4, 0x00, 0xbc, 0x00, 0xe4, 0x00, 0x4f, 0x18, 0x0e, 0x30, 0x4b, 0x28,
+      /* ... 384 bytes total ... */
+   } };
+
+   uint8_t buf[PKMN_LOGS_SIZE];
+   pkmn_gen1_log_options log_options = {.buf = buf, .len = PKMN_LOGS_SIZE};
+
+   pkmn_gen1_battle_options options;
+   pkmn_gen1_battle_options_set(&options, &log_options, NULL, NULL);
+
+   pkmn_result result;
+   pkmn_choice c1 = 0, c2 = 0;
+   while (!pkmn_result_type(result = pkmn_gen1_battle_update(&battle, c1, c2, &options))) {
+      c1 = choose(&battle, &random, PKMN_PLAYER_P1, pkmn_result_p1(result), choices);
+      c2 = choose(&battle, &random, PKMN_PLAYER_P2, pkmn_result_p2(result), choices);
+      pkmn_gen1_battle_options_set(&options, NULL, NULL, NULL);
+   }
+   assert(!pkmn_error(result));
+
+   // Read turn count (handle endianness manually)
+   volatile uint32_t endian = 0x01234567;
+   uint16_t turns = (*((uint8_t *)(&endian))) == 0x67
+      ? battle.bytes[368] | battle.bytes[369] << 8
+      : battle.bytes[368] << 8 | battle.bytes[369];
+
+   const char* outcome[] = {
+       "won by Player A",
+       "won by Player B",
+       "ended in a tie",
+       "encountered an error"
+   };
+   printf("Battle %s after %d turns\n", outcome[pkmn_result_type(result) - 1], turns);
+   return 0;
+}
+```
+
+Compile and run with:
+
+```bash
+gcc -o example example.c -lpkmn -I/usr/local/include -L/usr/local/lib
+./example 12345
+```
+
+## Linking
+
+<Tabs>
+  <Tab title="Cartridge mode">
+    ```bash
+    gcc -o my_app my_app.c -lpkmn -I/usr/local/include -L/usr/local/lib
+    ```
+  </Tab>
+  <Tab title="Showdown mode">
+    ```bash
+    gcc -o my_app my_app.c -lpkmn-showdown -I/usr/local/include -L/usr/local/lib
+    ```
+  </Tab>
+</Tabs>
+
+The two libraries are ABI-compatible — you can switch between them by changing the link target. Both are available in the binary releases.
+
+## Community bindings
+
+The following bindings for other languages are built on top of `libpkmn` by developers outside the pkmn organization. These may not be up-to-date, complete, or correct — inclusion here does not imply endorsement.
+
+| Language | License | Repository |
+|---|---|---|
+| **C++** | `BSL-1.0` | https://github.com/pasyg/wrapsire |
+| **Python** | `MIT` | https://github.com/AnnikaCodes/PyKMN |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Zig guide" icon="code" href="/guides/zig">
+    Full-featured usage directly from Zig
+  </Card>
+  <Card title="TypeScript guide" icon="js" href="/guides/typescript">
+    Use the engine via the npm package
+  </Card>
+  <Card title="Zig & C API reference" icon="book" href="/api/zig-api">
+    Complete C and Zig API documentation
+  </Card>
+  <Card title="Design" icon="pen" href="/concepts/design">
+    Understand the engine's architectural decisions
+  </Card>
+</CardGroup>

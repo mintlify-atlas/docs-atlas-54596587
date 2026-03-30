@@ -1,0 +1,606 @@
+---
+title: 'Zig API'
+description: 'Complete reference for the pkmn Zig package API, covering core types, protocol logging, battle options, and per-generation namespaces.'
+---
+
+The `pkmn` Zig package is the primary interface for embedding the battle engine. Import it from your `build.zig` dependency and configure it via build options or a root source file declaration.
+
+```zig
+const pkmn = @import("pkmn");
+
+// Or configure options at the root of your binary:
+pub const pkmn_options = .{ .showdown = true, .log = true };
+```
+
+---
+
+## Size constants
+
+These constants govern how large your preallocated buffers need to be. The `SIZE` variants are power-of-two rounded (optimal for allocators), while `MAX` variants are the exact minimum.
+
+| Constant | Description |
+|---|---|
+| `pkmn.CHOICES_SIZE` | Optimal buffer size in bytes for choice arrays. At least as large as `MAX_CHOICES`. |
+| `pkmn.MAX_CHOICES` | Minimum bytes required to hold all choice options. |
+| `pkmn.LOGS_SIZE` | Optimal buffer size in bytes for a single update's log data. At least as large as `MAX_LOGS`. |
+| `pkmn.MAX_LOGS` | Maximum bytes a single `update` call can log. |
+
+Generation-specific variants (`pkmn.gen1.CHOICES_SIZE`, `pkmn.gen1.LOGS_SIZE`, etc.) are also available on each generation namespace.
+
+---
+
+## Core types
+
+### `pkmn.Player`
+
+```zig
+pub const Player = enum(u1) { P1, P2 };
+```
+
+Identifies one of the two battle participants. Methods:
+
+- `foe(self: Player) Player` — returns the opponent.
+- `ident(self: Player, id: u3) ID` — returns an `ID` for the player's Pokémon at one-indexed slot `id`.
+
+---
+
+### `pkmn.Choice`
+
+```zig
+pub const Choice = packed struct(u8) {
+    type: Choice.Type = .Pass,
+    data: u6 = 0,
+};
+```
+
+A 1-byte packed struct encoding a player's action for a single turn.
+
+<ParamField path="type" type="Choice.Type">
+  The kind of action:
+  - `.Pass` — no decision (used at battle start or when only the opponent decides).
+  - `.Move` — use a move. `data` is `1`–`4`.
+  - `.Switch` — switch Pokémon. `data` is `2`–`6`.
+</ParamField>
+
+<ParamField path="data" type="u6">
+  Contextual data for the action type. `0` for pass; move slot index for `.Move`; party slot for `.Switch`.
+</ParamField>
+
+---
+
+### `pkmn.Result`
+
+```zig
+pub const Result = packed struct(u8) {
+    type: Result.Type = .None,
+    p1: Choice.Type = .Pass,
+    p2: Choice.Type = .Pass,
+};
+```
+
+The 1-byte outcome returned by `Battle.update`. All `type` values other than `.None` are terminal.
+
+| `Result.Type` | Meaning |
+|---|---|
+| `.None` | Battle is ongoing. |
+| `.Win` | P1 won. |
+| `.Lose` | P1 lost. |
+| `.Tie` | Draw. |
+| `.Error` | Desync, end-of-battle condition, or log overflow (not possible in Showdown mode). |
+
+Convenience constants: `Result.Win`, `Result.Lose`, `Result.Tie`, `Result.Error`, `Result.Default` (both players choose `.Move`).
+
+After a `.None` result, `result.p1` and `result.p2` indicate the `Choice.Type` each player must provide next. Pass these to `Battle.choices` to enumerate the valid options.
+
+---
+
+### `pkmn.PSRNG`
+
+```zig
+pub const PSRNG = extern struct {
+    src: Gen56,
+    pub fn init(seed: u64) PSRNG;
+    pub fn next(self: *PSRNG) u32;
+    pub fn advance(self: *PSRNG, n: usize) void;
+    pub fn range(self: *PSRNG, comptime T: type, from: T, to: Bound(T)) T;
+    pub fn chance(self: *PSRNG, comptime T: type, numerator: T, denominator: Bound(T)) bool;
+    pub fn newSeed(self: *PSRNG) u64;
+};
+```
+
+Pokémon Showdown's RNG, backed by the Generation V & VI algorithm. Use `PSRNG.init(seed)` to construct an instance.
+
+---
+
+### `pkmn.Rational`
+
+```zig
+pub fn Rational(comptime T: type) type
+```
+
+A lazily-reduced rational number used internally to track probabilities when `-Dchance` is enabled. Call `reduce()` explicitly before reading the numerator/denominator.
+
+Key methods: `reset`, `update(p, q)`, `add(s)`, `mul(s)`, `reduce`.
+
+---
+
+### `pkmn.Array`
+
+```zig
+pub const Array = @import("common/array.zig").Array;
+```
+
+Helpers for working with bit-packed arrays of non-power-of-2 types.
+
+---
+
+### `pkmn.Optional`
+
+```zig
+pub const Optional = @import("common/optional.zig").Optional;
+```
+
+An optimized optional representation that stores the empty `None` value as a sentinel, avoiding space overhead.
+
+---
+
+## `pkmn.protocol` namespace
+
+The `protocol` namespace provides types for capturing the engine's binary wire protocol during an `update`. Protocol logging must be enabled at build time with `-Dlog`.
+
+### `pkmn.protocol.Log(WriterT)`
+
+```zig
+pub fn Log(comptime WriterT: type) type
+```
+
+Generic logging interface. Wraps any `WriterT` and writes protocol bytes to it during a battle update. For most use cases, prefer `FixedLog`.
+
+---
+
+### `pkmn.protocol.FixedLog`
+
+```zig
+pub const FixedLog = Log(Writer);
+```
+
+A `Log` backed by the optimized `Writer`. Initialize it with a `LOGS_SIZE`-sized buffer. This is the recommended choice for performance-sensitive code.
+
+```zig
+var buf: [pkmn.LOGS_SIZE]u8 = undefined;
+var writer: pkmn.protocol.Writer = .{ .buffer = &buf };
+const log = pkmn.protocol.FixedLog{ .writer = &writer };
+```
+
+After each `update`, call `writer.reset()` to reuse the buffer.
+
+---
+
+### `pkmn.protocol.Writer`
+
+```zig
+pub const Writer = // minimal fixed buffer writer
+```
+
+A minimal logging helper optimized for efficiently writing individual protocol bytes into a fixed buffer. This is **not** a `std.Io.Writer` and should not be used for general-purpose writing.
+
+---
+
+### `pkmn.protocol.NULL`
+
+```zig
+pub const NULL = // null object pattern Log
+```
+
+A null object implementation of `Log` backed by a null writer. Discards all log writes. When logging is unnecessary, also disable it entirely at build time with `-Dlog=false`.
+
+---
+
+## `pkmn.battle` namespace
+
+```zig
+pub const battle = @import("common/battle.zig");
+```
+
+Cross-generation battle helpers.
+
+### `pkmn.battle.options(log, chance, calc)`
+
+```zig
+pub fn options(log: anytype, chance: anytype, calc: anytype) Options(...)
+```
+
+Creates a typed `Options` struct that bundles the three optional feature handlers passed to `Battle.update`. Use `pkmn.gen1.NULL` (or `pkmn.gen2.NULL`) as a shorthand for the null object pattern that disables all optional features.
+
+```zig
+var options = pkmn.battle.options(
+    pkmn.protocol.FixedLog{ .writer = &writer },
+    pkmn.gen1.chance.NULL,
+    pkmn.gen1.calc.NULL,
+);
+```
+
+---
+
+## `pkmn.gen1` namespace
+
+Generation I battle types and logic.
+
+### `pkmn.gen1.Battle`
+
+```zig
+pub fn Battle(comptime RNG: anytype) type
+```
+
+The central Generation I battle struct. Parameterized over an RNG type. The standard concrete type is `Battle(PRNG)` (size: 384 bytes).
+
+**Fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `sides` | `[2]Side` | Both players' sides. |
+| `turn` | `u16` | Current turn number. |
+| `last_damage` | `u16` | Last damage dealt by either side. |
+| `last_moves` | `[2]MoveDetails` | Last move data for desync detection. |
+| `rng` | `RNG` | The pseudo-random number generator. |
+
+**Methods:**
+
+<ParamField path="update(c1, c2, options) → !Result">
+  Applies P1's choice `c1` and P2's choice `c2` to the battle. Writes protocol logs to `options.log` when `-Dlog` is enabled. Returns a `Result`.
+
+  **Passing an invalid choice (not present in the output of `choices`) is undefined behavior.**
+</ParamField>
+
+<ParamField path="choices(player, request, out) → u8">
+  Fills `out` with valid choices for `player` given `request` (from `result.p1` / `result.p2`). Returns the number of choices written.
+
+  May return `0` in cartridge mode when the Transform + Mirror Move/Metronome PP error interacts with Disable (a soft-lock). Always returns `> 0` in Showdown mode.
+</ParamField>
+
+<ParamField path="side(self, player) → *Side">
+  Returns the `Side` for the given `player`.
+</ParamField>
+
+<ParamField path="foe(self, player) → *Side">
+  Returns the opponent's `Side`.
+</ParamField>
+
+<ParamField path="active(self, player) → ID">
+  Returns an identifier for `player`'s active Pokémon.
+</ParamField>
+
+---
+
+### `pkmn.gen1.Side`
+
+```zig
+pub const Side = extern struct {
+    pokemon: [6]Pokemon,
+    active: ActivePokemon,
+    order: [6]u8,
+    last_selected_move: Move,
+    last_used_move: Move,
+};
+```
+
+One side of the battle. `order` holds one-based slot indexes reflecting current party order. Size: 184 bytes.
+
+**Methods:** `get(slot) → *Pokemon` (by one-indexed slot), `stored() → *Pokemon` (active Pokémon's party entry).
+
+---
+
+### `pkmn.gen1.ActivePokemon`
+
+Represents the battle state of the currently-active Pokémon, including volatiles, boosts, transformed move slots, and type overrides.
+
+---
+
+### `pkmn.gen1.Pokemon`
+
+Party Pokémon data including species, stats, HP, status, level, types, moves, and DVs.
+
+---
+
+### `pkmn.gen1.MoveSlot`
+
+```zig
+pub const MoveSlot = // packed struct
+```
+
+A single move slot with `.id` (the `Move`) and `.pp` (remaining PP).
+
+---
+
+### `pkmn.gen1.MoveDetails`
+
+Details required to detect desyncs based on the last move selected/executed by each player.
+
+---
+
+### `pkmn.gen1.Status`
+
+```zig
+pub const Status = // bitfield
+```
+
+Major status condition bitfield (shared between Gen I and Gen II). Encodes sleep, poison, burn, freeze, and paralysis.
+
+---
+
+### `pkmn.gen1.Volatiles`
+
+```zig
+pub const Volatiles = // bitfield packed struct
+```
+
+Volatile status bitfield including confusion, flinch, binding, bide, and other temporary in-battle conditions.
+
+---
+
+### `pkmn.gen1.Stats`
+
+```zig
+pub fn Stats(comptime T: type) type
+```
+
+Stat values (HP, Attack, Defense, Speed, Special) parameterized over the storage type.
+
+---
+
+### `pkmn.gen1.Boosts`
+
+Stat stage boosts (Attack, Defense, Speed, Special, Accuracy, Evasion), ranged −6 to +6.
+
+---
+
+### `pkmn.gen1.Move`
+
+```zig
+pub const Move = enum // u8
+```
+
+Enumeration of all Generation I moves. Includes `.None` as the zero value.
+
+---
+
+### `pkmn.gen1.Species`
+
+```zig
+pub const Species = enum // u8
+```
+
+Enumeration of all Generation I Pokémon species. Includes `.None` as the zero value.
+
+---
+
+### `pkmn.gen1.Type` / `pkmn.gen1.Types` / `pkmn.gen1.Effectiveness`
+
+`Type` enumerates elemental types. `Types` is a packed struct holding a Pokémon's primary and secondary types. `Effectiveness` encodes type matchup multipliers (`.Immune`, `.Resisted`, `.Neutral`, `.Super`).
+
+---
+
+### `pkmn.gen1.DVs`
+
+```zig
+pub const DVs = // packed struct
+```
+
+Generation I determinant values (Attack, Defense, Speed, Special). HP DV is derived from the others.
+
+---
+
+### `pkmn.gen1.PRNG`
+
+```zig
+pub const PRNG = rng.PRNG(1);
+```
+
+The Generation I cartridge RNG. In Showdown compatibility mode (`-Dshowdown`) this is backed by `PSRNG` instead.
+
+---
+
+### `pkmn.gen1.NULL`
+
+```zig
+pub const NULL = pkmn.battle.options(protocol.NULL, chance.NULL, calc.NULL);
+```
+
+Null object implementation of `pkmn.battle.Options` for Generation I. Pass `&pkmn.gen1.NULL` to `Battle.update` when no optional features are needed.
+
+---
+
+### `pkmn.gen1.Chance` (requires `-Dchance`)
+
+```zig
+pub const Chance = @import("gen1/chance.zig").Chance;
+```
+
+Tracks chance actions and their associated probability during a Generation I battle update. Must be enabled at build time with `-Dchance`.
+
+---
+
+### `pkmn.gen1.chance` sub-namespace
+
+| Type | Description |
+|---|---|
+| `chance.Actions` | RNG events observed during an `update` for both players (16 bytes). Can be passed as input to force specific outcomes when `-Dcalc` is enabled. |
+| `chance.Action` | RNG observations for a single player. |
+| `chance.Durations` | Duration tracking for probabilistic effects. |
+| `chance.Duration` | Duration data for a single player. |
+| `chance.NULL` | Null object for `Chance`. |
+
+---
+
+### `pkmn.gen1.Calc` (requires `-Dcalc`)
+
+```zig
+pub const Calc = @import("gen1/calc.zig").Calc;
+```
+
+Allows forcing specific RNG events during an `update` via `overrides` (`Actions`) and tracks `summaries` of damage calculation data. Must be enabled at build time with `-Dcalc`.
+
+---
+
+### `pkmn.gen1.calc` sub-namespace
+
+| Type | Description |
+|---|---|
+| `calc.Summaries` | Damage calculation info for both players (12 bytes). |
+| `calc.Summary` | Per-player damage calculation info: `damage.base`, `damage.final`, `damage.capped`. |
+| `calc.Rolls` | Damage roll enumeration support. |
+| `calc.MAX_FRONTIER` | Maximum number of frontier states for calc traversal. |
+| `calc.NULL` | Null object for `Calc`. |
+
+---
+
+### `pkmn.gen1.helpers`
+
+```zig
+pub const helpers = @import("gen1/helpers.zig");
+```
+
+Provides ergonomic initialization helpers for Generation I battles:
+
+- **`helpers.Battle.init(seed, p1, p2) → Battle(PRNG)`** — initialize a battle from team specs and a seed.
+- **`helpers.Battle.fixed(rolls, p1, p2) → Battle(FixedRNG)`** — initialize with a deterministic RNG.
+- **`helpers.Battle.random(rand, opts) → Battle(PRNG)`** — randomly generated teams.
+- **`helpers.Side.init(ps) → Side`** — initialize a side from a slice of `Pokemon` specs.
+- **`helpers.Pokemon`** — configuration struct with fields: `species`, `moves`, `hp`, `status`, `level`, `dvs`, `stats`.
+
+---
+
+## `pkmn.gen2` namespace
+
+Generation II uses the same overall structure as Generation I. The namespaced types mirror `gen1` with the following additions and differences.
+
+<Note>
+  Generation II support is currently in progress. The `gen2` namespace follows the same conventions as `gen1` but adds weather, held items, gender, and the `Field` struct.
+</Note>
+
+### Additional types (Gen II only)
+
+| Type | Description |
+|---|---|
+| `pkmn.gen2.Field` | Field conditions: `weather` (`Weather`) and `weather_duration` (`u4`). |
+| `pkmn.gen2.Weather` | Weather enum: `.None`, `.Rain`, `.Sun`, `.Sandstorm`. |
+| `pkmn.gen2.Gender` | Pokémon gender. |
+| `pkmn.gen2.Item` | Held item enum. |
+| `pkmn.gen2.TriAttack` | Tri Attack secondary effect type. |
+
+### Size
+
+`Battle(PRNG)` in Generation II is 512 bytes.
+
+### Shared types
+
+The following types exist in both namespaces with generation-appropriate definitions:
+
+`Battle`, `Side`, `ActivePokemon`, `Pokemon`, `MoveSlot`, `Status`, `Volatiles`, `Stats`, `Boosts`, `Move`, `Species`, `Type`, `Types`, `Effectiveness`, `DVs`, `PRNG`, `NULL`, `CHOICES_SIZE`, `MAX_CHOICES`, `LOGS_SIZE`, `MAX_LOGS`, `Chance`, `chance.Actions`, `chance.Action`, `chance.Durations`, `chance.Duration`, `chance.NULL`, `Calc`, `calc.Summaries`, `calc.Summary`, `calc.NULL`, `helpers`.
+
+---
+
+## Full example
+
+```zig
+const std = @import("std");
+const pkmn = @import("pkmn");
+
+pub fn main(init: std.process.Init) !void {
+    // Set up required to be able to parse command line arguments
+    const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
+
+    // Expect that we have been given a decimal seed as our only argument
+    var err = std.Io.File.stderr().writer(init.io, &.{});
+    if (args.len != 2) {
+        try err.interface.print("Usage: {s} <seed>\n", .{args[0]});
+        std.process.exit(1);
+    }
+
+    const seed = std.fmt.parseUnsigned(u64, args[1], 10) catch {
+        try err.interface.print("Invalid seed: {s}\n", .{args[1]});
+        try err.interface.print("Usage: {s} <seed>\n", .{args[0]});
+        std.process.exit(1);
+    };
+
+    // Use Zig's system PRNG (`pkmn.PSRNG` is another option with a slightly different API)
+    var prng: std.Random.DefaultPrng = .init(seed);
+    var random = prng.random();
+    // Preallocate a small buffer for the choice options throughout the battle
+    var choices: [pkmn.CHOICES_SIZE]pkmn.Choice = undefined;
+
+    // `pkmn.gen1.Battle` can be tedious to initialize - the helper constructor used here
+    // fills in missing fields with intelligent defaults to cut down on boilerplate
+    var battle = pkmn.gen1.helpers.Battle.init(
+        random.int(u64),
+        &.{
+            .{ .species = .Bulbasaur, .moves = &.{ .SleepPowder, .SwordsDance, .RazorLeaf, .BodySlam } },
+            .{ .species = .Charmander, .moves = &.{ .FireBlast, .FireSpin, .Slash, .Counter } },
+            .{ .species = .Squirtle, .moves = &.{ .Surf, .Blizzard, .BodySlam, .Rest } },
+            .{ .species = .Pikachu, .moves = &.{ .Thunderbolt, .ThunderWave, .Surf, .SeismicToss } },
+            .{ .species = .Rattata, .moves = &.{ .SuperFang, .BodySlam, .Blizzard, .Thunderbolt } },
+            .{ .species = .Pidgey, .moves = &.{ .DoubleEdge, .QuickAttack, .WingAttack, .MirrorMove } },
+        },
+        &.{
+            .{ .species = .Tauros, .moves = &.{ .BodySlam, .HyperBeam, .Blizzard, .Earthquake } },
+            .{ .species = .Chansey, .moves = &.{ .Reflect, .SeismicToss, .SoftBoiled, .ThunderWave } },
+            .{ .species = .Snorlax, .moves = &.{ .BodySlam, .Reflect, .Rest, .IceBeam } },
+            .{ .species = .Exeggutor, .moves = &.{ .SleepPowder, .Psychic, .Explosion, .DoubleEdge } },
+            .{ .species = .Starmie, .moves = &.{ .Recover, .ThunderWave, .Blizzard, .Thunderbolt } },
+            .{ .species = .Alakazam, .moves = &.{ .Psychic, .SeismicToss, .ThunderWave, .Recover } },
+        },
+    );
+
+    // Preallocate a buffer for the log and create a `Log` handler which will write to it.
+    // `pkmn.LOGS_SIZE` is guaranteed to be large enough for a single update. This will only be
+    // written to if `-Dlog` is enabled - `pkmn.protocol.NULL` can be used to turn all of the
+    // logging into no-ops. Here we are using the optimized `pkmn.protocol.FixedLog` which should
+    // be more efficient than `pkmn.protocol.Log(std.Io.Writer.fixed([]u8))`, though that or a `Log`
+    // backed by some other `std.Io.Writer` would also work. This example doesn't demonstrate how to
+    // use `-Dchance` or `-Dcalc` so we just pass the no-op implementations here
+    var buf: [pkmn.LOGS_SIZE]u8 = undefined;
+    var writer: pkmn.protocol.Writer = .{ .buffer = &buf };
+    var options = pkmn.battle.options(
+        pkmn.protocol.FixedLog{ .writer = &writer },
+        pkmn.gen1.chance.NULL,
+        pkmn.gen1.calc.NULL,
+    );
+
+    var c1: pkmn.Choice = .{};
+    var c2: pkmn.Choice = .{};
+
+    var result = try battle.update(c1, c2, &options);
+    while (result.type == .None) : (result = try battle.update(c1, c2, &options)) {
+        // Here we would do something with the log data in buf if `-Dlog` were enabled
+        // _ = buf;
+
+        // `battle.choices` determines what the possible choices are - the simplest way to
+        // choose an option here is to just use the system PRNG to pick one at random
+        //
+        // Technically due to Generation I's Transform + Mirror Move/Metronome PP error if the
+        // battle contains Pokémon with a combination of Transform, Mirror Move/Metronome, and
+        // Disable its possible that there are no available choices (softlock), though this is
+        // impossible here given that our example battle involves none of these moves
+        const n1 = random.uintLessThan(u8, battle.choices(.P1, result.p1, &choices));
+        c1 = choices[n1];
+        const n2 = random.uintLessThan(u8, battle.choices(.P2, result.p2, &choices));
+        c2 = choices[n2];
+
+        // Reset the stream to cause the buffer to get reused
+        writer.reset();
+    }
+
+    // The result is from the perspective of P1
+    const msg = switch (result.type) {
+        .Win => "won by Player A",
+        .Lose => "won by Player B",
+        .Tie => "ended in a tie",
+        .Error => "encountered an error",
+        else => unreachable,
+    };
+
+    var out = std.Io.File.stdout().writer(init.io, &.{});
+    try out.interface.print("Battle {s} after {d} turns\n", .{ msg, battle.turn });
+}
+```

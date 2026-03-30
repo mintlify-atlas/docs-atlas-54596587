@@ -1,0 +1,95 @@
+---
+title: "Design philosophy"
+description: "How the pkmn engine achieves extreme performance through data-oriented design, zero-overhead generational separation, and compile-time configuration."
+---
+
+The pkmn engine is designed around a single, uncompromising principle: **performance above all else**. Ergonomics, convenience, and simplicity are secondary concerns. Every architectural decision flows from asking "what is the fastest way to do this?"
+
+## No compromises
+
+The engine is far more targeted in scope than either the original game cartridge or Pokémon Showdown. It approximates a subset of Pokémon Showdown's `Battle` class — specifically the part that simulates a battle turn by turn — and strips out everything else:
+
+- No asynchronous `BattleStream` equivalent (async text streams add latency)
+- No team or format validation (expected to happen at a higher level)
+- No input choice validation (the engine trusts its caller to provide valid inputs)
+
+This narrowing of scope is not a limitation; it is what makes extreme optimization tractable.
+
+## Data-oriented design
+
+The engine uses [data-oriented design](https://github.com/dbartolini/data-oriented-design) throughout. Data structures are laid out to minimize cache misses and maximize data locality:
+
+- **Packed structures** — fields are sized to hold exactly as much information as needed, nothing more. The engine's data structures carry roughly 25–35% overhead above the theoretical minimum bit count, compared to much higher overhead in typical JavaScript object layouts.
+- **Handles, not pointers** — instead of storing pointers to other objects (which require pointer chasing and can cause cache misses), the engine stores integer handles that index directly into arrays.
+- **No strings** — string processing is left entirely to driver code. Internally, every identifier (species, move, type, status, etc.) is a small `enum` integer that indexes into arrays without hashing or indirection.
+- **No dynamic memory allocation** — Pokémon battles were originally designed to run on severely constrained hardware. The engine takes advantage of this by operating exclusively on fixed-size, pre-allocated buffers. Callers allocate once; the engine never calls a memory allocator.
+- **Efficient lookups** — in most cases, range checks replace table lookups. Where lookups are unavoidable, linear searches over small arrays are used. In extreme cases, [perfect hashing](https://en.wikipedia.org/wiki/Perfect_hash_function) is applied.
+- **Native endianness** — all integers are written in the native byte order of the host system. This is the fastest possible representation on any architecture and means the protocol and binary layout are system-dependent by design.
+
+## Per-generation implementation
+
+Each Pokémon generation is implemented as a completely separate module. Code or data is shared across generations only when there is zero overhead for doing so.
+
+This means a Generation I simulation pays no price for the existence of Generation II, III, or later. The tradeoff is some code duplication, but in practice each generation is simpler, easier to optimize, and easier to reason about. Binary size is managed by pruning data to the bare minimum required for that generation's mechanics.
+
+Generators are accessed through separate namespaces: `pkmn.gen1`, `pkmn.gen2`, and so on.
+
+## Compile-time modes
+
+The biggest consequence of the "no compromises" approach is that some behavior is controlled by **compile-time flags** rather than runtime switches. This keeps the hot path free of conditional branches for features that a given use case may never need.
+
+### `-Dshowdown`: Pokémon Showdown compatibility
+
+By default, the engine implements Pokémon battles as the original game cartridges define them. With `-Dshowdown` enabled, the engine instead matches Pokémon Showdown's behavior exactly:
+
+- **RNG semantics** — Pokémon Showdown applies the Generation V & VI PRNG to all generations, rather than each generation's own RNG. Call counts, argument order, and seeding differ from the cartridge.
+- **Bugs** — Pokémon Showdown's own implementation bugs are reproduced faithfully.
+- **Standard ruleset modifications** — Endless Battle Clause, Sleep Clause Mod, Freeze Clause Mod, Desync Clause Mod, and Switch Priority Clause Mod are all enforced.
+
+Integration tests verify that the engine with `-Dshowdown` produces identical outcomes to a patched version of Pokémon Showdown.
+
+### `-Dlog`: binary protocol logging
+
+By default, the engine produces no output beyond the `Result` type returned by `update()`. With `-Dlog` enabled, each `update()` writes a compact binary [protocol](/concepts/protocol) to a log buffer, containing enough information to reconstruct a full Pokémon Showdown-style battle log.
+
+This opt-in design matters because not all use cases require logs. Random [Monte Carlo tree search](https://en.wikipedia.org/wiki/Monte_Carlo_tree_search) rollouts, for example, only care about the final result. Forcing every update to produce logs would be wasted work — and wasted work means slower simulations.
+
+<AccordionGroup>
+  <Accordion title="Comparison: Pokémon Showdown architecture">
+    Pokémon Showdown grew organically and was designed for extensibility and ease of development, not peak performance. Several architectural decisions work against speed:
+
+    - **Mod-based generation system** — Pokémon Showdown's core code reflects the current generation; older generations are implemented as "mods". This means older generation simulations pay the cost of branching through all modern generation logic.
+    - **Generic event system** — The engine dispatches events through a bubbling priority system. This is flexible but expensive. The event loop searches all possible sources for handlers even when there are zero or one actual handlers, making it the slowest part of the engine (a pattern identified and documented at [pkmn.cc/optimize](https://pkmn.cc/optimize)).
+    - **String-based IDs** — Pokémon Showdown's most fundamental type is an `ID`: a lowercased string with special characters removed. These are less efficient than integers, rely on string interning, and cause `toID` to be Pokémon Showdown's hottest function.
+    - **Bloated data layer** — The data layer is designed for general use across many tools. The extra generality introduces overhead irrelevant to battle simulation.
+    - **Object structure issues** — Pokémon Showdown does not carefully control object field initialization order, which inhibits V8's object shape optimizations. Key types use the `Object.assign(this, data)` pattern, and objects often carry 50–100 fields, making consistent initialization order practically impossible.
+    - **Map-based lookups** — Most core APIs look up keys in a map rather than indexing directly into an array. Both are $O(1)$, but map lookups cause pointer chasing and cache misses.
+    - **Always-on text protocol** — Text logs are produced on every update, regardless of whether they are consumed. Parsing and generating text is expensive and is wasted work for callers that ignore logs.
+    - **JavaScript's memory model** — Numbers in JavaScript are 4–8 bytes minimum. Carefully packed data structures require manipulating `ArrayBuffer` directly, which is non-ergonomic. Dynamic memory allocation is used extensively.
+    - **Language boundary overhead** — Code written in other languages must either embed a JavaScript runtime, pay boundary overhead, or use stdin/stdout streams (incurring syscall cost).
+  </Accordion>
+  <Accordion title="Comparison: original game cartridge">
+    The original Pokémon Red & Blue battle engine was written for a [GB Z80](https://rgbds.gbdev.io/docs/v0.5.1/gbz80.7) processor under time pressure, as one component of a complete role-playing game. This imposes constraints that no longer apply:
+
+    - **No multiply/divide** — the GB Z80 does not efficiently support multiply or divide instructions, and does not support modern SIMD. Algorithms were written around this limitation.
+    - **Full RPG features** — the cartridge battle engine includes code for the "Old Man" tutorial, Safari Zone mechanics, in-battle item use, catching Pokémon, running from battle, experience gain, badge boosts, disobedience, and "switch vs. set" mode. None of these apply to competitive link battles, and the pkmn engine removes all of them.
+    - **Haphazard data layout** — data was added organically to the cartridge over the course of development, resulting in layouts that reflect historical accident rather than cache efficiency.
+
+    By streamlining for competitive battle simulation and targeting modern hardware, the engine can eliminate this complexity entirely while achieving substantially higher performance.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Build options" icon="sliders" href="/concepts/build-options">
+    Complete reference for all compile-time flags
+  </Card>
+  <Card title="Protocol" icon="binary" href="/concepts/protocol">
+    Binary wire protocol enabled by `-Dlog`
+  </Card>
+  <Card title="Generations" icon="layer-group" href="/concepts/generations">
+    Per-generation implementation status and data structures
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first battle
+  </Card>
+</CardGroup>

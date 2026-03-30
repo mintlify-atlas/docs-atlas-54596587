@@ -1,97 +1,77 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "pkmn/engine"
+description: "A minimal, complete Pokémon battle simulation engine — over 1000× faster than Pokémon Showdown, with TypeScript, Zig, and C bindings."
 ---
 
-## Setting up
+A minimal, complete Pokémon battle simulation engine optimized for performance. Built in Zig with TypeScript/JavaScript, Zig, and C bindings. Designed for AI agents, tooling, and embedded systems.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Get started" icon="rocket" href="/quickstart">
+    Run your first Pokémon battle simulation in minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="download" href="/installation">
+    Install via npm, download binaries, or add as a Zig dependency
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="TypeScript guide" icon="square-js" href="/guides/typescript">
+    Use `@pkmn/engine` with the full TypeScript API
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API reference" icon="code" href="/api/battle">
+    Complete documentation for all public exports
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why pkmn/engine?
 
-Everything you need to create world-class documentation.
+The engine is **more than 1000× faster** than Pokémon Showdown in compatibility mode — purpose-built for use cases where simulation throughput matters.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+<Steps>
+  <Step title="Install the package">
+    ```bash
+    npm install @pkmn/engine
+    ```
+  </Step>
+  <Step title="Create a battle">
+    ```ts
+    import {Dex} from '@pkmn/dex';
+    import {Generations} from '@pkmn/data';
+    import {Battle, Choice} from '@pkmn/engine';
 
-## Need inspiration?
+    const gens = new Generations(Dex);
+    const battle = Battle.create(gens.get(1), {
+      seed: [1, 2, 3, 4],
+      p1: {name: 'Player 1', team: [/* your team */]},
+      p2: {name: 'Player 2', team: [/* your team */]},
+      log: false,
+    });
+    ```
+  </Step>
+  <Step title="Run the simulation">
+    ```ts
+    const choose = (choices: Choice[]) =>
+      choices[Math.floor(Math.random() * choices.length)];
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    let result = battle.update({type: 'pass'}, {type: 'pass'});
+    while (!result.type) {
+      const c1 = choose(battle.choices('p1', result));
+      const c2 = choose(battle.choices('p2', result));
+      result = battle.update(c1, c2);
+    }
+    console.log(result.type); // 'win', 'lose', or 'tie'
+    ```
+  </Step>
+</Steps>
+
+<CardGroup cols={2}>
+  <Card title="Design principles" icon="compass" href="/concepts/design">
+    Learn about the data-oriented design behind the engine's performance
+  </Card>
+  <Card title="Build options" icon="sliders" href="/concepts/build-options">
+    Configure Showdown compatibility, logging, and probability tracking
+  </Card>
+  <Card title="Zig guide" icon="wrench" href="/guides/zig">
+    Use the native Zig package for maximum performance
+  </Card>
+  <Card title="C API" icon="c" href="/api/c-api">
+    Integrate libpkmn into any language via the C bindings
+  </Card>
+</CardGroup>

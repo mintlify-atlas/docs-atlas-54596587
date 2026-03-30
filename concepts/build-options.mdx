@@ -1,0 +1,140 @@
+---
+title: "Build options"
+description: "Compile-time flags that configure the pkmn engine's behavior, correctness mode, logging, and optional features."
+---
+
+The pkmn engine uses compile-time options to avoid runtime overhead for features that a given use case does not need. Options can be passed either as Zig build flags or declared in your root source file.
+
+<Tabs>
+  <Tab title="Zig build flags">
+    ```bash
+    zig build -Dshowdown -Dlog -Doptimize=ReleaseFast
+    ```
+  </Tab>
+  <Tab title="Root source file declaration">
+    ```zig
+    // In your root source file (e.g. main.zig or build.zig)
+    pub const pkmn_options = .{ .showdown = true, .log = true };
+    ```
+  </Tab>
+  <Tab title="build.zig dependency">
+    ```zig
+    const pkmn = b.dependency("pkmn", .{ .showdown = true, .log = true });
+    exe.root_module.addImport("pkmn", pkmn.module("pkmn"));
+    ```
+  </Tab>
+</Tabs>
+
+If you set an option in both a build flag and a root source file declaration and the values conflict, the build will fail with a compile error.
+
+## Options reference
+
+| Option | Default | Description |
+|---|---|---|
+| `-Dshowdown` | `false` | Pokémon Showdown compatibility mode |
+| `-Dlog` | `false` | Binary protocol logging |
+| `-Dchance` | `false` | RNG probability tracking |
+| `-Dcalc` | `false` | Damage calculation support |
+| `-Doptimize` | `Debug` | Zig optimization level |
+
+---
+
+<ParamField path="showdown" type="bool" default="false">
+  Enables Pokémon Showdown compatibility mode. When set, the engine's behavior matches Pokémon Showdown rather than the original game cartridges.
+
+  Changes include:
+  - **RNG semantics** — The Generation V & VI PRNG is applied to all generations, rather than each generation's own RNG. The number of RNG calls, argument order, and seeding differ from the cartridge.
+  - **Bugs** — Known Pokémon Showdown implementation bugs are reproduced faithfully.
+  - **Standard ruleset modifications** — Endless Battle Clause (battle ends in a tie after 1000 turns), Sleep Clause Mod, Freeze Clause Mod, Desync Clause Mod (desyncs cause failure instead of corrupt state), and Switch Priority Clause Mod (faster Pokémon switches first on simultaneous switches) are all enforced.
+
+  The C API produces `libpkmn-showdown` when this flag is enabled. Integration tests verify parity with a patched version of Pokémon Showdown.
+
+  **Effect on binary:** changes RNG, battle logic, and some data structure layouts (the RNG state is larger in showdown mode).
+
+  **Effect on correctness:** changes which results the engine produces.
+</ParamField>
+
+<ParamField path="log" type="bool" default="false">
+  Enables binary [protocol](/concepts/protocol) logging. When enabled, each `update()` call writes a log of battle events to the `Log` writer provided via `battle.options`.
+
+  The log format is a compact binary translation of Pokémon Showdown's SIM-PROTOCOL. Use `pkmn.LOGS_SIZE` to pre-allocate a buffer of the correct size.
+
+  This flag is required to use the `pkmn-debug` tool. Binary releases of `libpkmn` and `libpkmn-showdown` ship with `-Dlog` enabled by default.
+
+  When `-Dlog` is not set, the engine produces no output about battle events — it communicates only through the `Result` return value. This is desirable for use cases like random MCTS rollouts where log output would be discarded.
+
+  **Effect on binary:** increases code size; each `update()` writes additional bytes.
+
+  **Effect on performance:** measurable overhead per update. Omitting this flag is the fastest configuration.
+</ParamField>
+
+<ParamField path="chance" type="bool" default="false">
+  Enables RNG probability tracking via the `Chance` type. When enabled, the engine tracks the probability of each RNG event that occurs during a battle update. This is useful for building AI agents that reason about outcome distributions.
+
+  The `Chance` object is accessed through `battle.options`. Per-generation types are available: `pkmn.gen1.Chance`, `pkmn.gen1.chance.Actions`, `pkmn.gen1.chance.Action`, etc.
+
+  **Effect on binary:** adds probability tracking state and code.
+
+  **Effect on performance:** overhead per RNG event during updates.
+</ParamField>
+
+<ParamField path="calc" type="bool" default="false">
+  Enables damage calculation support via the `Calc` type. When enabled, each `update()` produces summaries of damage calculation information (base damage, final damage, damage cap) for both players.
+
+  `Calc` can also be used to override specific RNG events via the `Overrides` mechanism — forcing particular damage rolls, critical hit outcomes, or effect durations. This is useful for damage calculators and deterministic testing.
+
+  Per-generation types are available: `pkmn.gen1.Calc`, `pkmn.gen1.calc.Summaries`, `pkmn.gen1.calc.Summary`, etc.
+
+  **Effect on binary:** adds calc state and override logic.
+
+  **Effect on performance:** overhead per update when summaries are collected.
+</ParamField>
+
+<ParamField path="optimize" type="enum" default="Debug">
+  Controls the Zig compiler's optimization level. Accepted values:
+
+  | Value | Description |
+  |---|---|
+  | `Debug` | No optimization, safety checks enabled, fast compile |
+  | `ReleaseSafe` | Optimized, safety checks enabled |
+  | `ReleaseFast` | Maximum performance, safety checks disabled |
+  | `ReleaseSmall` | Minimizes binary size |
+
+  For production use and benchmarking, `ReleaseFast` is recommended. For development and debugging, `Debug` or `ReleaseSafe` gives better error messages.
+
+  ```bash
+  zig build -Doptimize=ReleaseFast
+  ```
+</ParamField>
+
+## Option effects at a glance
+
+| Option | Binary size | Performance | Correctness |
+|---|---|---|---|
+| `-Dshowdown` | Slight increase (larger RNG state) | Neutral | Changes semantics to match PS |
+| `-Dlog` | Increase | Decrease | No effect on battle outcomes |
+| `-Dchance` | Increase | Decrease | No effect on battle outcomes |
+| `-Dcalc` | Increase | Decrease | No effect on battle outcomes (unless overrides are used) |
+| `-Doptimize=ReleaseFast` | Decrease | Large increase | No effect |
+
+## Null objects
+
+When optional features (`-Dlog`, `-Dchance`, `-Dcalc`) are disabled, their associated types still exist but do nothing. Null object implementations are provided for each:
+
+```zig
+// These accept the same API but are no-ops when the feature is disabled
+pkmn.protocol.NULL  // Log that discards all writes
+pkmn.gen1.chance.NULL  // Chance that does nothing
+pkmn.gen1.calc.NULL    // Calc that does nothing
+```
+
+This allows calling code to remain unchanged regardless of which features are compiled in.
+
+<CardGroup cols={2}>
+  <Card title="Design philosophy" icon="compass" href="/concepts/design">
+    Why options are compile-time, not runtime
+  </Card>
+  <Card title="Protocol" icon="binary" href="/concepts/protocol">
+    What `-Dlog` produces
+  </Card>
+</CardGroup>

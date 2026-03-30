@@ -1,0 +1,122 @@
+---
+title: 'pkmn-debug'
+description: 'Reference for the pkmn-debug CLI tool, which decodes binary battle state and protocol log data into a human-readable HTML page or JSON dump.'
+---
+
+`pkmn-debug` is a command-line tool that decodes the binary data structures and protocol logs used by the pkmn engine and renders them into a standalone HTML page for debugging. An [online demo](https://pkmn.cc/debug.html) is available.
+
+---
+
+## Installation
+
+`pkmn-debug` ships with the `@pkmn/engine` npm package.
+
+<Tabs>
+  <Tab title="Project-local (npx)">
+    ```bash
+    npm install @pkmn/engine
+    npx pkmn-debug
+    ```
+  </Tab>
+  <Tab title="Global install">
+    ```bash
+    npm install --global @pkmn/engine
+    pkmn-debug
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Usage
+
+`pkmn-debug` reads binary debug protocol data and writes to standard output.
+
+```bash
+# Read from stdin, output HTML
+<cmd> | pkmn-debug > index.html
+
+# Read from a file, output HTML
+pkmn-debug <file> > index.html
+
+# Output JSON instead of HTML
+pkmn-debug --json <file> > index.json
+```
+
+<ParamField path="<file>" type="string">
+  Path to a binary file containing debug protocol data. If omitted, `pkmn-debug` reads from standard input.
+</ParamField>
+
+<ParamField path="--json" type="flag">
+  Dumps the decoded data as JSON instead of rendering an HTML page.
+</ParamField>
+
+---
+
+## Requirements
+
+The binary data consumed by `pkmn-debug` must come from an engine binary compiled with **`-Dlog`** enabled. Without `-Dlog`, the engine writes no protocol bytes and there is nothing to decode.
+
+<Warning>
+  `pkmn-debug` reads the debug protocol format, not the standard wire protocol. The debug format includes battle state snapshots in addition to log bytes. Standard `-Dlog` output alone is not sufficient — you also need driver code that writes the full debug format described below.
+</Warning>
+
+---
+
+## Debug protocol format
+
+The debug protocol is a binary stream consisting of a **header** followed by zero or more **frames**.
+
+### Header
+
+The header must appear once at the start of the stream:
+
+| Offset | Size | Description |
+|---|---|---|
+| `0` | 1 byte | Showdown compatibility flag (`1` if `-Dshowdown` was enabled, `0` otherwise) |
+| `1` | 1 byte | Generation number (e.g. `1` for Gen I, `2` for Gen II) |
+| `2` | 2 bytes | Signed native-endian integer $N$: fixed log buffer size per frame. Negative implies variable-length (terminated by `0x00` or EOF). |
+| `4` | 4 bytes | Signed native-endian integer $X$: fixed extra data buffer size per frame. Negative implies variable-length. |
+| `8` | $B$ bytes | Serialized initial battle state ($B$ bytes as defined by the generation's layout) |
+
+For Generation I, $B = 384$ bytes. For Generation II, $B = 512$ bytes.
+
+### Frame
+
+After the header, each frame represents one battle update:
+
+| Offset | Size | Description |
+|---|---|---|
+| `0` | $N$ bytes | Protocol log bytes for this update. Terminated by `0x00` or EOF if $N < 0$. |
+| `N` | $X$ bytes | Optional extra data. Terminated by `0x00` or EOF if $X < 0$. |
+| `N+X+1` | $B$ bytes | Serialized battle state after the update |
+| `N+X+B+2` | 1 byte | `pkmn_result` / `pkmn.Result` for this update |
+| `N+X+B+3` | 1 byte | Next choice for Player 1 |
+| `N+X+B+4` | 1 byte | Next choice for Player 2 |
+
+<Note>
+  By convention, debug logs start **after** the first battle update (i.e. after both players switch in their lead Pokémon). The initial battle state before any Pokémon are active, and the initial required pass choices and result, are **not logged**.
+</Note>
+
+---
+
+## Protocol wire format
+
+The log bytes within each frame follow the pkmn wire protocol — a stripped-down binary encoding of [Pokémon Showdown's SIM-PROTOCOL](https://github.com/smogon/pokemon-showdown/blob/master/sim/SIM-PROTOCOL.md):
+
+- Redundant messages (e.g. `|upkeep|`, `|`) are omitted.
+- There is no `|split|` message — the omniscient event stream is always provided.
+- The protocol uses **native endianness** throughout.
+- Protocol details vary slightly by generation (e.g. moves require more than one byte after Gen II).
+
+See [`docs/PROTOCOL.md`](https://github.com/pkmn/engine/blob/master/docs/PROTOCOL.md) in the engine repository for the complete message reference.
+
+---
+
+## Choice encoding
+
+| Raw byte | Type | Data |
+|---|---|---|
+| `0x00` | `pass` | none |
+| `0x01` | `move` | `0`–`4` (move slot) |
+| `0x02` | `switch` | `2`–`6` (party slot) |

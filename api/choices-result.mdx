@@ -1,0 +1,199 @@
+---
+title: "Choices & Result"
+description: "Types for player decisions and battle outcomes in @pkmn/engine."
+---
+
+Every call to `battle.update` consumes a `Choice` from each player and returns
+a `Result`. The `Result` tells you whether the battle is over and what type of
+choice each player must make next.
+
+---
+
+## `Player`
+
+```ts
+type Player = 'p1' | 'p2';
+```
+
+Identifies one of the two participants in a battle. Player 1 is always `'p1'`
+and Player 2 is always `'p2'`. Results are expressed from Player 1's
+perspective.
+
+---
+
+## `Slot`
+
+```ts
+type Slot = 1 | 2 | 3 | 4 | 5 | 6;
+```
+
+A one-indexed party position. Used to identify which Pokémon a switch choice
+targets.
+
+---
+
+## `Choice`
+
+```ts
+interface Choice {
+  type: 'pass' | 'move' | 'switch';
+  data: number;
+}
+```
+
+A `Choice` represents the action a player takes on their turn.
+
+<ResponseField name="type" type="'pass' | 'move' | 'switch'">
+
+  | Value      | Meaning |
+  |------------|---------|
+  | `'pass'`   | No action required (used at battle start and after certain events). `data` is `0`. |
+  | `'move'`   | Use the move in slot `data` (1–4). `data` of `0` is used internally. |
+  | `'switch'` | Switch to the Pokémon in party slot `data` (2–6). |
+
+</ResponseField>
+
+<ResponseField name="data" type="number">
+  The numeric payload for the choice. For `'pass'`, always `0`. For `'move'`,
+  the 1-indexed move slot (1–4). For `'switch'`, the party slot to switch into
+  (2–6, since slot 1 is the active Pokémon).
+</ResponseField>
+
+<Warning>
+  **Never construct a `Choice` manually.** Always call `battle.choices(player,
+  result)` to obtain the list of valid choices for a player. Passing a choice
+  that is not in the `choices()` output to `battle.update` produces
+  **undefined behavior**.
+</Warning>
+
+### `Choice` static helpers
+
+The `Choice` class provides static utilities for working with choices.
+
+<ResponseField name="Choice.pass" type="Choice">
+  The canonical pass choice: `{ type: 'pass', data: 0 }`.
+</ResponseField>
+
+<ResponseField name="Choice.move(data)" type="Choice">
+  Returns a move choice for the given slot. `data` must be `0 | 1 | 2 | 3 | 4`.
+</ResponseField>
+
+<ResponseField name="Choice.switch(data)" type="Choice">
+  Returns a switch choice for the given party slot. `data` must be
+  `2 | 3 | 4 | 5 | 6`.
+</ResponseField>
+
+<ResponseField name="Choice.decode(byte)" type="Choice">
+  Decode a choice from its single-byte binary representation.
+</ResponseField>
+
+<ResponseField name="Choice.encode(choice?)" type="number">
+  Encode a choice to its single-byte binary representation.
+</ResponseField>
+
+<ResponseField name="Choice.parse(choice)" type="Choice">
+  Parse a Pokémon Showdown choice string (e.g. `'move 1'`, `'switch 3'`,
+  `'pass'`) into a `Choice`. Only numeric data is supported.
+</ResponseField>
+
+<ResponseField name="Choice.format(choice)" type="string">
+  Format a `Choice` into a Pokémon Showdown–compatible string.
+</ResponseField>
+
+---
+
+## `Result`
+
+```ts
+interface Result {
+  type: undefined | 'win' | 'lose' | 'tie' | 'error';
+  p1: Choice['type'];
+  p2: Choice['type'];
+}
+```
+
+Returned by `battle.update`. Describes the outcome of the most recent turn and
+what each player must do next.
+
+<ResponseField name="type" type="undefined | 'win' | 'lose' | 'tie' | 'error'">
+  The terminal state of the battle from Player 1's perspective.
+
+  | Value       | Meaning |
+  |-------------|---------|
+  | `undefined` | Battle is ongoing. Continue calling `update`. |
+  | `'win'`     | Player 1 has won. |
+  | `'lose'`    | Player 2 has won (Player 1 has lost). |
+  | `'tie'`     | The battle ended in a draw. |
+  | `'error'`   | The battle terminated due to an error (e.g. a desync). Not possible in Showdown mode. |
+
+  When `type` is defined (truthy), the battle is over and `update` should not
+  be called again.
+</ResponseField>
+
+<ResponseField name="p1" type="Choice['type']">
+  The type of choice Player 1 must make next: `'pass'`, `'move'`, or
+  `'switch'`. Pass this to `battle.choices('p1', result)` to get the valid
+  choices.
+</ResponseField>
+
+<ResponseField name="p2" type="Choice['type']">
+  The type of choice Player 2 must make next. Same shape as `p1`.
+</ResponseField>
+
+### `Result` static helpers
+
+<ResponseField name="Result.decode(byte)" type="Result">
+  Decode a result from its single-byte binary representation.
+</ResponseField>
+
+<ResponseField name="Result.encode(result)" type="number">
+  Encode a result to its single-byte binary representation.
+</ResponseField>
+
+---
+
+## Battle loop example
+
+The following example shows the idiomatic way to drive a battle to completion.
+
+```ts
+import { Generations } from '@pkmn/data';
+import { Dex } from '@pkmn/dex';
+import { Battle, Choice, Result } from '@pkmn/engine';
+
+const gens = new Generations(Dex);
+const gen  = gens.get(1);
+
+const battle = Battle.create(gen, {
+  seed: [1, 2, 3, 4],
+  showdown: true,
+  p1: { team: p1Team },
+  p2: { team: p2Team },
+});
+
+// Pass at the start of the battle (no choices to make yet)
+let result: Result;
+let c1 = Choice.pass;
+let c2 = Choice.pass;
+
+while (!(result = battle.update(c1, c2)).type) {
+  // result.type is undefined → battle is ongoing
+  // Obtain the valid choices for each player and pick one
+  c1 = pickRandom(battle.choices('p1', result));
+  c2 = pickRandom(battle.choices('p2', result));
+}
+
+// result.type is now 'win', 'lose', 'tie', or 'error'
+console.log(`Battle ended: ${result.type} after ${battle.turn} turns`);
+
+function pickRandom<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+```
+
+<Note>
+  `battle.choices()` can theoretically return an empty array in Generation I
+  without Showdown mode when the Transform + Mirror Move/Metronome PP error
+  interacts with Disable. This causes a cartridge soft-lock and cannot occur
+  with `showdown: true`.
+</Note>

@@ -1,0 +1,247 @@
+---
+title: "Data & Lookup"
+description: "Translation tables for mapping between Pokémon Showdown identifiers and engine-internal integers."
+---
+
+The `Lookup` class is a translation table that converts between the
+human-readable string identifiers used by `@pkmn/data` / Pokémon Showdown and
+the compact integer identifiers used internally by the pkmn engine. You will
+need a `Lookup` instance when constructing a `Log` and when working directly
+with raw battle bytes.
+
+---
+
+## `Lookup` class
+
+```ts
+class Lookup {
+  static get(gen: Generation): Lookup;
+
+  get sizes(): { types: number; species: number; moves: number; items: number };
+
+  typeByNum(num: number): TypeName;
+  typeByName(name: TypeName): number;
+
+  speciesByNum(num: number): ID;
+  speciesByID(id: ID | undefined): number;
+
+  moveByNum(num: number): ID;
+  moveByID(id: ID | undefined): number;
+
+  itemByNum(num: number): ID;
+  itemByID(id: ID | undefined): number;
+}
+```
+
+### `Lookup.get`
+
+```ts
+static get(gen: Generation): Lookup
+```
+
+Returns (and caches) the `Lookup` table for the given generation. The same
+instance is returned on every call for the same `gen.num`.
+
+<ParamField path="gen" type="Generation" required>
+  A `@pkmn/data` `Generation` object. Currently Generation I and II are
+  supported (`gen.num` must be `1` or `2`).
+</ParamField>
+
+<ResponseField name="returns" type="Lookup">
+  The cached lookup table for the generation.
+</ResponseField>
+
+---
+
+### `lookup.sizes`
+
+```ts
+get sizes(): { types: number; species: number; moves: number; items: number }
+```
+
+Returns the count of entries in each sub-table.
+
+<ResponseField name="types" type="number">Number of types in the generation.</ResponseField>
+<ResponseField name="species" type="number">Number of species in the generation.</ResponseField>
+<ResponseField name="moves" type="number">Number of moves in the generation.</ResponseField>
+<ResponseField name="items" type="number">Number of items in the generation (0 for Gen I).</ResponseField>
+
+---
+
+### Type methods
+
+<ResponseField name="typeByNum(num)" type="TypeName">
+  Decodes an engine type integer to a `@pkmn/data` `TypeName`.
+
+  ```ts
+  lookup.typeByNum(0); // e.g. 'Normal'
+  ```
+</ResponseField>
+
+<ResponseField name="typeByName(name)" type="number">
+  Encodes a `TypeName` to the engine integer used as an identifier.
+
+  ```ts
+  lookup.typeByName('Fire'); // e.g. 20
+  ```
+</ResponseField>
+
+---
+
+### Species methods
+
+<ResponseField name="speciesByNum(num)" type="ID">
+  Decodes an engine species integer to a `@pkmn/data` `ID`.
+
+  ```ts
+  lookup.speciesByNum(1); // 'bulbasaur'
+  ```
+</ResponseField>
+
+<ResponseField name="speciesByID(id)" type="number">
+  Encodes a species `ID` to the engine integer. Returns `0` for `undefined`.
+
+  ```ts
+  lookup.speciesByID('pikachu' as ID); // e.g. 25
+  ```
+</ResponseField>
+
+---
+
+### Move methods
+
+<ResponseField name="moveByNum(num)" type="ID">
+  Decodes an engine move integer to a `@pkmn/data` `ID`.
+
+  ```ts
+  lookup.moveByNum(33); // 'tackle'
+  ```
+</ResponseField>
+
+<ResponseField name="moveByID(id)" type="number">
+  Encodes a move `ID` to the engine integer. Returns `0` for `undefined`.
+
+  ```ts
+  lookup.moveByID('thunderbolt' as ID); // e.g. 85
+  ```
+</ResponseField>
+
+---
+
+### Item methods
+
+<ResponseField name="itemByNum(num)" type="ID">
+  Decodes an engine item integer to a `@pkmn/data` `ID`. (Only relevant for
+  Generation II and later.)
+</ResponseField>
+
+<ResponseField name="itemByID(id)" type="number">
+  Encodes an item `ID` to the engine integer. Returns `0` for `undefined`.
+</ResponseField>
+
+---
+
+## `Data<T>` type
+
+```ts
+type Data<T> =
+  T extends readonly any[] ? { [K in keyof T]: Data<T[K]> }
+  : T extends Iterable<infer U> ? (U extends object ? Iterable<Data<U>> : T)
+  : T extends object ? { [K in keyof T as T[K] extends Function ? never : K]: Data<T[K]> }
+  : T;
+```
+
+A utility type that recursively strips all function-typed properties from `T`,
+leaving only plain data fields. Used in two places:
+
+- **`battle.toJSON(): Data<Battle>`** — the return type when serializing a
+  battle to a plain object.
+- **`Battle.restore(gen, battle: Data<Battle>, options)`** — the input type
+  when restoring from a snapshot.
+
+---
+
+## Usage examples
+
+<Tabs>
+  <Tab title="Basic lookup">
+    ```ts
+    import { Generations } from '@pkmn/data';
+    import { Dex } from '@pkmn/dex';
+    import { Lookup } from '@pkmn/engine';
+
+    const gens   = new Generations(Dex);
+    const gen    = gens.get(1);
+    const lookup = Lookup.get(gen);
+
+    // Engine integer → human-readable ID
+    const speciesId = lookup.speciesByNum(6);   // 'charizard'
+    const moveId    = lookup.moveByNum(53);      // 'flamethrower'
+    const typeName  = lookup.typeByNum(20);      // 'Fire'
+
+    // Human-readable ID → engine integer
+    import { toID } from '@pkmn/data';
+    const speciesNum = lookup.speciesByID(toID('charizard'));   // 6
+    const moveNum    = lookup.moveByID(toID('flamethrower'));   // 53
+    const typeNum    = lookup.typeByName('Fire');               // 20
+    ```
+  </Tab>
+  <Tab title="With Log.parse">
+    ```ts
+    import { Generations } from '@pkmn/data';
+    import { Dex } from '@pkmn/dex';
+    import { Battle, Info, Log, Lookup } from '@pkmn/engine';
+
+    const gens = new Generations(Dex);
+    const gen  = gens.get(1);
+
+    const options = {
+      seed: [1, 2, 3, 4],
+      showdown: true,
+      log: true,
+      p1: { name: 'Alice', team: p1Team },
+      p2: { name: 'Bob',   team: p2Team },
+    } as const;
+
+    const battle = Battle.create(gen, options);
+
+    // Lookup.get is called once; the result is cached
+    const lookup = Lookup.get(gen);
+    const log    = new Log(gen, lookup, new Info(gen, options));
+
+    // ... run battle turns ...
+
+    for (const line of log.parse(battle.log!)) {
+      console.log(line.args);
+    }
+    ```
+  </Tab>
+  <Tab title="Snapshot & restore">
+    ```ts
+    import { Generations } from '@pkmn/data';
+    import { Dex } from '@pkmn/dex';
+    import { Battle, Data } from '@pkmn/engine';
+
+    const gens = new Generations(Dex);
+    const gen  = gens.get(1);
+
+    const battle = Battle.create(gen, {
+      seed: [1, 2, 3, 4],
+      showdown: true,
+      p1: { team: p1Team },
+      p2: { team: p2Team },
+    });
+
+    // Serialize — Data<Battle> contains no functions, only plain data
+    const snapshot: Data<typeof battle> = battle.toJSON();
+
+    // Restore later (p1/p2 teams must match the original battle)
+    const restored = Battle.restore(gen, snapshot, {
+      showdown: true,
+      p1: { name: 'Alice', team: p1Team },
+      p2: { name: 'Bob',   team: p2Team },
+      log: true,
+    });
+    ```
+  </Tab>
+</Tabs>

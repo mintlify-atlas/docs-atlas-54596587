@@ -1,0 +1,200 @@
+---
+title: "Benchmarking"
+description: "How to measure pkmn engine performance and interpret results against Pokémon Showdown."
+---
+
+The pkmn engine is **more than 1000× faster** than the patched Pokémon Showdown simulator when playing out supported formats in compatibility mode. This page explains how to run the benchmarks, what they measure, and how to interpret the results.
+
+<Warning>
+  Benchmarks measure random playouts in `-Dshowdown` compatibility mode with all other build options disabled. The 1000× figure specifically applies to this configuration. Enabling `-Dlog` or other options will reduce performance.
+</Warning>
+
+## What the benchmark measures
+
+The benchmark (`src/test/benchmark.ts`) measures how long it takes to play out N randomly generated battles, **excluding setup time and V8 JIT warmup**. This scenario approximates the [Monte Carlo tree search](https://en.wikipedia.org/wiki/Monte_Carlo_tree_search) use case: playing battles to the end repeatedly each turn to determine the best move.
+
+Using a tool like `hyperfine` directly would be misleading here because `--warmup` in `hyperfine` is intended to warm disk caches, not the V8 JIT compiler. The custom benchmark tool handles warmup correctly.
+
+### The three configurations
+
+The benchmark measures three configurations side by side:
+
+<AccordionGroup>
+  <Accordion title="DirectBattle (patched Pokémon Showdown)">
+    `DirectBattle` overrides the Pokémon Showdown `Battle` class to strip out unused functionality:
+
+    1. Methods that write to the battle log are overridden to drop messages immediately
+    2. `sendUpdates` is overridden to not send any updates
+    3. `makeRequest` avoids serializing requests for each side
+
+    `DirectBattle` is driven synchronously rather than through the async `BattleStream`, which is approximately 10% faster and eliminates concerns about race conditions. It is also patched to remove unnecessary speed tie overhead. This is as close to maximum Pokémon Showdown performance as possible.
+  </Accordion>
+  <Accordion title="@pkmn/engine (TypeScript driver)">
+    This configuration uses the `@pkmn/engine` TypeScript driver package to run battles through the pkmn engine from Node.js. It includes the overhead of crossing the Node.js native addon boundary on each update call.
+  </Accordion>
+  <Accordion title="libpkmn (native Zig)">
+    This configuration runs battles directly using the `libpkmn` native library, bypassing JavaScript entirely. The benchmark runner invokes `src/test/benchmark.zig` and reports the results. This represents the upper bound of engine performance.
+  </Accordion>
+</AccordionGroup>
+
+Both pkmn configurations are built with `-Dshowdown` and all other build options disabled. The Pokémon Showdown configurations run a warmup period before measurement to ensure results reflect actual steady-state throughput.
+
+### Consistency checks
+
+To ensure all configurations are testing the same thing, the benchmark:
+
+- Initializes all configurations with the same PRNG seeds
+- Duplicates battle generation and move-selection logic in both Zig and TypeScript
+- Tracks total turns across all battles and the final RNG seed as a "checksum" to verify all configurations agree
+
+## Running the benchmark
+
+<Steps>
+  <Step title="Build for benchmarking">
+    Install the engine addon compiled without logging or extra debug options:
+
+    ```bash
+    node src/bin/install-pkmn-engine --options='-Dshowdown'
+    ```
+
+    For the native `libpkmn` configuration, build with `-Doptimize=ReleaseFast`:
+
+    ```bash
+    zig build -Doptimize=ReleaseFast -Dshowdown
+    ```
+  </Step>
+  <Step title="Tune your environment">
+    Before running the benchmark, stabilize your environment to reduce measurement noise. On Linux this includes:
+
+    - Disabling CPU frequency scaling
+    - Disabling Intel Turbo Boost (or AMD equivalent)
+    - Disabling hyperthreading
+    - Using CPU shielding (`cset`) to isolate benchmark threads
+
+    See the [benchmarking setup details](#environment-setup) below for the full procedure used for the reference results.
+  </Step>
+  <Step title="Run the benchmark">
+    ```bash
+    npm run benchmark
+    ```
+
+    To benchmark a specific number of battles:
+
+    ```bash
+    npm run benchmark -- --battles=10000
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The Makefile `benchmark` target handles the addon build and then runs the benchmark: `make benchmark`.
+</Note>
+
+## Interpreting results
+
+### The 1000× speedup
+
+The reference results come from running `npm run benchmark -- --battles=10000` on an `n2d-standard-48` Google Cloud machine (AMD EPYC 7B12, 64-bit x86 Linux) against [pkmn/engine@9ce6e379](https://github.com/pkmn/engine/commit/9ce6e379):
+
+| Generation | `libpkmn` | `@pkmn/engine` | `DirectBattle` |
+| ---------- | --------- | -------------- | -------------- |
+| **RBY**    | 195 ms    | 737 ms (3.78×) | 618 s (3167×)  |
+
+The `libpkmn` result (195 ms) represents the raw engine speed. The `@pkmn/engine` result (737 ms) adds Node.js native addon overhead. The `DirectBattle` result (618 s) is Pokémon Showdown at its fastest — the 3167× ratio is the source of the ">1000×" claim.
+
+<Info>
+  The relative performance differences between configurations depend on the specific machine. However, the orders of magnitude shown above are expected to hold across hardware.
+</Info>
+
+### Benchmark teams vs. real usage
+
+The benchmark generates teams using ["Challenge Cup"](https://bulbapedia.bulbagarden.net/wiki/Challenge_Cup) semantics, which include suboptimal moves (for example, Thunder Shock alongside Thunderbolt). These teams are expected to be roughly **2–3× slower** than teams generated with typical competitive ["Random Battle"](https://github.com/pkmn/randbats) sets or handcrafted teams.
+
+This means real-world performance in practice is likely better than what the benchmark reports.
+
+## Regression benchmarking
+
+The benchmark tool has an alternative mode for detecting performance regressions. When `--iterations` is provided, the tool runs multiple iterations from the same seed and outputs a TSV:
+
+```bash
+npm --silent run benchmark -- --iterations=50 > logs/before.tsv
+# make changes
+npm --silent run benchmark -- --iterations=50 logs/before.tsv
+```
+
+The second invocation reads the baseline TSV and reports how performance changed. Outliers are removed and the mean is reported.
+
+A text or JSON summary can also be produced:
+
+```bash
+npm run benchmark -- --iterations=50 --summary=json
+```
+
+## Zig compiler patch
+
+For optimal `libpkmn` performance, building Zig from source after applying the [`zig.patch`](https://github.com/pkmn/engine/blob/master/zig.patch) file in the repo root is recommended. This patch reverts [ziglang/zig#17391](https://github.com/ziglang/zig/pull/17391), which introduced a [compiler regression](https://github.com/ziglang/zig/issues/17768) that negatively impacts the engine's codegen.
+
+```bash
+# After cloning Zig source:
+git apply /path/to/engine/zig.patch
+# Then build Zig from source normally
+```
+
+## Environment setup
+
+<Accordion title="Reference benchmark setup (Google Cloud)">
+  The reference results were produced on a spot `n2d-standard-48` instance provisioned with:
+
+  ```bash
+  gcloud beta compute instances create pkmn-engine-benchmark \
+    --zone=us-central1-a \
+    --machine-type=n2d-standard-48 \
+    --image-project=ubuntu-os-cloud \
+    --image-family=ubuntu-minimal-2204-lts \
+    --max-run-duration=30m \
+    --provisioning-model=SPOT \
+    --instance-termination-action=DELETE
+  ```
+
+  After SSH-ing in, dependencies were installed:
+
+  ```bash
+  sudo apt update
+  sudo apt --assume-yes install git cpuset
+  git clone --depth 1 https://github.com/pkmn/engine.git
+  cd engine
+  curl -fsSL https://raw.githubusercontent.com/tj/n/master/bin/n | sudo bash -s lts
+  npm install
+  export PATH="$(pwd)/build/bin/zig:$PATH"
+  ```
+
+  The tuning script disables hyperthreading, applies CPU shielding, drops filesystem caches, and runs the benchmark at elevated priority:
+
+  ```bash
+  # Turn off hyperthreading
+  for cpu in {24..47}; do
+    echo 0 > /sys/devices/system/cpu/cpu$cpu/online
+  done
+
+  # Shield CPUs 1-9, move kernel threads out
+  cset shield -c 1-9 -k on
+
+  # Drop filesystem cache
+  echo 3 > /proc/sys/vm/drop_caches
+  sync
+
+  # Run at highest priority within shield
+  cset shield --exec -- nice -n -19 node build/test/benchmark
+  ```
+</Accordion>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="flask" href="/development/testing">
+    Unit and integration test infrastructure for the engine
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/development/contributing">
+    How to build, lint, and submit changes
+  </Card>
+</CardGroup>

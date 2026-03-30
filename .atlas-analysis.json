@@ -1,0 +1,107 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "pkmn/engine",
+  "projectDescription": "A minimal, complete Pokémon battle simulation engine written in Zig with TypeScript/JavaScript bindings, optimized for performance and designed for AI, tooling, and embedded use cases.",
+  "theme": "luma",
+  "primaryColor": "#ea242c",
+  "lightColor": "#929292",
+  "darkColor": "#0d0809",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/typescript",
+              "guides/zig",
+              "guides/c",
+              "guides/browser-wasm"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/design",
+              "concepts/protocol",
+              "concepts/build-options",
+              "concepts/generations"
+            ]
+          },
+          {
+            "group": "Testing & Development",
+            "pages": [
+              "development/testing",
+              "development/benchmarking",
+              "development/contributing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "TypeScript API",
+            "pages": [
+              "api/battle",
+              "api/choices-result",
+              "api/protocol-log",
+              "api/data-lookup"
+            ]
+          },
+          {
+            "group": "Zig & C API",
+            "pages": [
+              "api/zig-api",
+              "api/c-api"
+            ]
+          },
+          {
+            "group": "Tools",
+            "pages": [
+              "api/pkmn-debug"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "1000x faster than Pokémon Showdown in compatibility mode",
+    "Frame-accurate and bug-for-bug compatible with Gen I & II cartridges",
+    "Pokémon Showdown compatibility mode via -Dshowdown build flag",
+    "Binary wire protocol with optional logging via -Dlog build flag",
+    "Supports Zig, TypeScript/JavaScript, C, and WebAssembly targets",
+    "Zero dynamic memory allocation — fixed-size pre-allocated buffers",
+    "Deterministic RNG control with FixedRNG for AI/testing use cases",
+    "Data-oriented design with cache-friendly packed data structures",
+    "Probability tracking and damage calc support via optional build flags"
+  ],
+  "publicApiSurface": [
+    "Battle.create(gen, options) — initialize a new battle",
+    "Battle.restore(gen, battle, options) — restore an in-progress battle",
+    "battle.update(c1, c2) — advance battle state with player choices",
+    "battle.choices(player, result) — enumerate valid choices for a player",
+    "battle.log — binary protocol log DataView from last update",
+    "Log.parse(line, info) — parse binary protocol into Pokémon Showdown format",
+    "initialize(options) — set up the native engine addon",
+    "Lookup.get(gen) — get generation-specific data lookup table",
+    "Choice — player action (pass, move, switch)",
+    "Result — battle update outcome with type and player flags",
+    "Info / SideInfo — protocol parsing helpers",
+    "pkmn.gen1.Battle — Zig Generation I battle type",
+    "pkmn.gen2.Battle — Zig Generation II battle type",
+    "pkmn_battle_update() — C API battle update",
+    "pkmn_gen1_battle_options_set() — C API options initialization"
+  ]
+}
